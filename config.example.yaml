@@ -18,6 +18,17 @@ server:
   failure_cooldown: 30s    # a failed target is deprioritised for this long
   health_interval: 60s     # background provider probes; 0 disables
   health_timeout: 10s
+  # Client IP allowlist for every route (API, /pass/, /admin/, /healthz). CIDRs or
+  # bare IPs; empty or omitted allows everyone. Loopback is always allowed. Applied
+  # on reload. Peers not listed are dropped at connect time, before the TLS handshake.
+  # allow_cidrs:
+  #   - 10.0.0.0/8
+  #   - 192.168.0.0/16
+  #   - fd00::/8
+  # Reverse proxies whose X-Forwarded-For is trusted: the client is the right-most
+  # entry that is not itself a trusted proxy. Without this, X-Forwarded-For is ignored.
+  # trusted_proxies:
+  #   - 172.18.0.2
   tls:
     mode: off                    # off | file | self-signed | acme
     # file: a certificate written by any tool (lego, certbot, cert-manager...),

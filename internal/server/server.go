@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gstos/SimpleLLMRouter/internal/allowlist"
 	"github.com/gstos/SimpleLLMRouter/internal/auth"
 	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/health"
@@ -29,6 +30,7 @@ type Server struct {
 	client *http.Client
 	log    *slog.Logger
 	opts   Options
+	guard  *allowlist.Guard
 }
 
 // Options configures optional server behaviour.
@@ -72,8 +74,9 @@ func New(log *slog.Logger, opts Options) *Server {
 				return errors.New("upstream redirects are not allowed")
 			},
 		},
-		log:  log,
-		opts: opts,
+		log:   log,
+		opts:  opts,
+		guard: allowlist.NewGuard(log),
 	}
 	s.Seal(&config.Config{})
 	return s
@@ -81,14 +84,31 @@ func New(log *slog.Logger, opts Options) *Server {
 
 // Update atomically switches to a new, decrypted config (startup, reload, unseal).
 func (s *Server) Update(cfg *config.Config, rt *router.Router, checker *health.Checker) {
+	s.setAllow(cfg)
 	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys), router: rt, checker: checker})
 }
 
 // Seal serves cfg's client keys without credentials: API calls get 503 until a
 // master key arrives via /admin/unseal.
 func (s *Server) Seal(cfg *config.Config) {
+	s.setAllow(cfg)
 	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys)})
 }
+
+// setAllow compiles the client allowlist of cfg. A config that fails to parse
+// was already rejected by Validate; keep the previous list rather than opening up.
+func (s *Server) setAllow(cfg *config.Config) {
+	l, err := allowlist.Parse(cfg.Server.AllowCIDRs, cfg.Server.TrustedProxies)
+	if err != nil {
+		s.log.Error("invalid server.allow_cidrs/trusted_proxies; keeping the previous list", "err", err)
+		return
+	}
+	s.guard.Set(l)
+}
+
+// Guard returns the client allowlist guard, for wrapping listeners. It follows
+// config reloads.
+func (s *Server) Guard() *allowlist.Guard { return s.guard }
 
 // Sealed reports whether the server is waiting for a master key.
 func (s *Server) Sealed() bool { return s.cur.Load().sealed() }
@@ -122,7 +142,11 @@ func (s *Server) Handler() http.Handler {
 		}
 		_, _ = io.WriteString(w, "ok\n")
 	})
-	return mux
+	// The allowlist runs before routing, auth and every route (including /healthz;
+	// loopback is always allowed).
+	return s.guard.Middleware(mux, func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusForbidden, "client address not allowed")
+	}, nil)
 }
 
 // authenticate returns the current snapshot and the caller's key, or writes a 401.

@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gstos/SimpleLLMRouter/internal/acme"
+	"github.com/gstos/SimpleLLMRouter/internal/allowlist"
 	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/configfile"
 	"github.com/gstos/SimpleLLMRouter/internal/harden"
@@ -159,21 +160,42 @@ var serveCmd = &cobra.Command{
 			httpSrv.TLSConfig = tlsMgr.TLSConfig()
 		}
 		errc := make(chan error, 2)
+		guard := srv.Guard()
 		go func() {
+			ln, err := net.Listen("tcp", listen)
+			if err != nil {
+				errc <- err
+				return
+			}
+			ln = guard.Listener(ln) // drops disallowed peers before the TLS handshake
 			if tlsMgr != nil {
-				errc <- httpSrv.ListenAndServeTLS("", "") // certificate comes from tlsMgr
+				errc <- httpSrv.ServeTLS(ln, "", "") // certificate comes from tlsMgr
 			} else {
-				errc <- httpSrv.ListenAndServe()
+				errc <- httpSrv.Serve(ln)
 			}
 		}()
 		var redirectSrv *http.Server
 		if tlsCfg.HTTPListen != "" {
 			var h http.Handler = httpsRedirect(listen)
-			if tlsCfg.Mode == config.TLSACME && tlsCfg.ACME.Challenge == config.ChallengeHTTP {
+			acmeHTTP := tlsCfg.Mode == config.TLSACME && tlsCfg.ACME.Challenge == config.ChallengeHTTP
+			if acmeHTTP {
 				h = acmeChallenges(webroot, h)
 			}
+			h = redirectGuard(guard, h, acmeHTTP)
 			redirectSrv = &http.Server{Addr: tlsCfg.HTTPListen, Handler: h, ReadHeaderTimeout: 10 * time.Second, ErrorLog: errLog}
-			go func() { errc <- redirectSrv.ListenAndServe() }()
+			go func() {
+				ln, err := net.Listen("tcp", tlsCfg.HTTPListen)
+				if err != nil {
+					errc <- err
+					return
+				}
+				if !acmeHTTP {
+					// Let's Encrypt validators connect from anywhere, so with HTTP-01
+					// this listener is filtered per request instead (redirectGuard).
+					ln = guard.Listener(ln)
+				}
+				errc <- redirectSrv.Serve(ln)
+			}()
 		}
 		scheme := "http"
 		if tlsMgr != nil {
@@ -446,10 +468,12 @@ func tlsWatchFiles(m *tlsconf.Manager) []string {
 	return m.WatchFiles()
 }
 
+const acmeChallengePrefix = "/.well-known/acme-challenge/"
+
 // acmeChallenges serves HTTP-01 challenge files that lego writes into webroot;
 // everything else goes to next.
 func acmeChallenges(webroot string, next http.Handler) http.Handler {
-	const prefix = "/.well-known/acme-challenge/"
+	const prefix = acmeChallengePrefix
 	files := http.FileServer(http.Dir(webroot))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -463,6 +487,19 @@ func acmeChallenges(webroot string, next http.Handler) http.Handler {
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+// redirectGuard applies the client allowlist to the plain-HTTP listener. With
+// ACME HTTP-01 only the challenge path is exempt; everything else from a
+// disallowed client gets 403.
+func redirectGuard(g *allowlist.Guard, next http.Handler, acmeHTTP bool) http.Handler {
+	var exempt func(*http.Request) bool
+	if acmeHTTP {
+		exempt = func(r *http.Request) bool { return strings.HasPrefix(r.URL.Path, acmeChallengePrefix) }
+	}
+	return g.Middleware(next, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "client address not allowed", http.StatusForbidden)
+	}, exempt)
 }
 
 // httpsRedirect sends plain-HTTP requests to the same host on the TLS port.

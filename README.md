@@ -20,6 +20,7 @@ An OpenRouter-compatible LLM router in Go.
 - **HTTPS** with automatic certificates from Let's Encrypt or any ACME CA (via
   [lego](https://go-acme.github.io/lego/), HTTP-01 or DNS-01 with wildcards), your own
   certificates (renewed by any tool), or a generated self-signed one, all swapped in live.
+- **Client IP allowlist** (`server.allow_cidrs`) for every route, enforced before the TLS handshake.
 - **Hot reload** of the config, live key rotation, and a CLI to manage it all.
 
 ## Install
@@ -264,8 +265,53 @@ simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 
   the client's key.
 
 Since there is no router authentication on `/pass/`, anyone who can reach the router can relay
-through it to these providers (with their own provider key). Keep it on a trusted network, or
-behind a proxy that restricts access.
+through it to these providers (with their own provider key). Restrict who can connect with
+[`server.allow_cidrs`](#client-allowlist), keep it on a trusted network, or put it behind a proxy
+that restricts access.
+
+## Client allowlist
+
+`server.allow_cidrs` limits which client addresses may use the router at all. It covers every
+route: the API, `/pass/`, `/admin/` and `/healthz`.
+
+```yaml
+server:
+  allow_cidrs:           # CIDRs or bare IPs (a bare IP is /32 or /128); empty = allow everyone
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+  trusted_proxies: []    # optional, see below
+```
+
+- **Empty or omitted allows everyone** (the default). Invalid entries are reported by
+  `simple-router validate` and rejected on reload.
+- **Loopback is always allowed** (`127.0.0.0/8`, `::1`), on every route, so `unseal`, key rotation
+  over the API and the container health check (`simple-router ping`) keep working.
+- **Enforced at connect time.** A peer that is not loopback, not in `allow_cidrs` and not in
+  `trusted_proxies` is disconnected right after `accept`, before the TLS handshake, so it never
+  sees the certificate. The same applies to the `server.tls.http_listen` redirect listener.
+- **Behind a reverse proxy**, list the proxy's address in `trusted_proxies`. For requests whose TCP
+  peer is a trusted proxy, the client is taken from `X-Forwarded-For`, read from **right to
+  left**: entries that are themselves trusted proxies are skipped and the first other entry is
+  the client (the left side is supplied by the client and can't be trusted). A missing or empty
+  header means the proxy itself is the client. A malformed entry counts as untrusted and the
+  request is denied. The resolved client must be in `allow_cidrs` (or loopback); a proxy is
+  therefore not automatically allowed as a client. Without `trusted_proxies`, `X-Forwarded-For`
+  is ignored. Denied requests get `403` with the usual JSON error before any auth or routing.
+  Note that a proxy running on the same host connects from loopback: put its address in
+  `trusted_proxies` too, or everything it forwards is allowed.
+- **ACME HTTP-01 exemption**: with `tls.mode: acme` and `acme.challenge: http`, the
+  `http_listen` listener can't filter connections (Let's Encrypt validators connect from the
+  internet). It filters per request instead and exempts only `/.well-known/acme-challenge/`;
+  everything else from a disallowed client gets `403`. The main HTTPS listener stays filtered at
+  connect time.
+- **Live reload**: `allow_cidrs` and `trusted_proxies` apply on reload without a restart (see
+  [Hot reload](#hot-reload)).
+- **Logging**: rejected peers are logged at most once per address per minute, never per
+  connection.
+- **Docker**: with published ports on the default bridge network, the peer the router sees is
+  usually the Docker gateway (e.g. `172.17.0.1`), not the real client. Either use host networking,
+  include the gateway in `allow_cidrs` (which then allows everything that reaches the published
+  port, so it protects nothing), or put a proxy in front and list it in `trusted_proxies`.
 
 ## Routing
 
@@ -352,7 +398,7 @@ regular rotation.
 A config that fails to parse, validate or decrypt is logged and ignored, and the running one keeps
 serving. Requests in progress finish on the config they started with; sticky sessions, cooldowns
 and health state carry over. Without a key file, reloads use the in-memory key. Only changes to
-`server.listen` and `server.tls` settings need a restart; certificate files rotate live (see
+`server.listen` and `server.tls` settings need a restart (`allow_cidrs` and `trusted_proxies` apply live); certificate files rotate live (see
 [HTTPS](#https)).
 
 ## HTTPS

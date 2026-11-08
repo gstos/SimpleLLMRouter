@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gstos/SimpleLLMRouter/internal/allowlist"
 	"github.com/gstos/SimpleLLMRouter/internal/secrets"
 )
 
@@ -43,6 +44,11 @@ type Server struct {
 	HealthInterval  time.Duration `mapstructure:"health_interval"`
 	HealthTimeout   time.Duration `mapstructure:"health_timeout"`
 	TLS             TLS           `mapstructure:"tls"`
+	// AllowCIDRs restricts clients to these CIDRs or bare IPs (loopback is always
+	// allowed). Empty allows everyone.
+	AllowCIDRs []string `mapstructure:"allow_cidrs"`
+	// TrustedProxies: peers whose X-Forwarded-For is used to find the client.
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
 }
 
 // TLS modes.
@@ -372,6 +378,10 @@ func (c *Config) ApplyDefaults() {
 func (c *Config) Validate() error {
 	var errs []string
 	add := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
+
+	if _, err := allowlist.Parse(c.Server.AllowCIDRs, c.Server.TrustedProxies); err != nil {
+		add("%s", err)
+	}
 
 	t := c.Server.TLS
 	switch t.Mode {
