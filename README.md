@@ -179,6 +179,10 @@ exist. Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
 4. Providers that fail the background health check (`GET <base_url>/models`), and targets on
    cooldown, go to the back of the list. They are still tried as a last resort.
 
+Upstream redirects are never followed, so provider credentials can't be forwarded to another host:
+a redirect counts as a failure (and fails over). Set `base_url` to the provider's final URL. The
+same applies to the CLI's calls to the router (`unseal`, `rotate master-key --api`, `ping`).
+
 ## Master key
 
 `serve` gets the master key from, in order:
