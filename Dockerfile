@@ -1,12 +1,16 @@
 # syntax=docker/dockerfile:1
 
 # ---- build ----
-FROM golang:1.27 AS build
+# Runs on the build machine's own architecture and cross-compiles for the target,
+# so multi-arch builds (linux/amd64, linux/arm64) need no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/simple-router .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/simple-router .
 
 # ---- runtime ----
 FROM gcr.io/distroless/static-debian12:nonroot

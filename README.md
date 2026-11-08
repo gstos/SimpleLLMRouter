@@ -82,6 +82,18 @@ Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
 
 ## Docker
 
+CI (`.github/workflows/ci.yml`) runs gofmt, vet and `go test -race` on every push and pull request,
+then builds a multi-arch image for `linux/amd64` and `linux/arm64` (Apple Silicon Macs run the
+arm64 one natively). Pushes to `main` and `v*` tags publish it to
+`ghcr.io/gstos/simplellmrouter` (`latest`, `main`, `sha-…`, and `1.2.3`/`1.2` for tags);
+pull requests build without publishing.
+
+```sh
+docker pull ghcr.io/gstos/simplellmrouter:latest
+```
+
+To build locally:
+
 ```sh
 docker build -t simple-router .
 docker run -d -p 8080:8080 \
