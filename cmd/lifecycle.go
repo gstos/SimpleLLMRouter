@@ -3,7 +3,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,13 +22,18 @@ const keyCheckComment = "Identifies the master key (not secret). Commands refuse
 
 // ---- init ----
 
-var initListen string
+var (
+	initListen string
+	initNoTLS  bool
+)
 
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "First-time setup: master key file, starter config and an admin client key",
 	Long: "Create a master key file (0600), a starter config containing master_key_check and an\n" +
 		"'admin' client key with access to all models. The admin key is printed once.\n" +
+		"The starter config serves HTTPS with a self-signed certificate (generated on first\n" +
+		"start, stored in tls/ next to the config); --no-tls writes a plain-HTTP config instead.\n" +
 		"Refuses to overwrite an existing key file or config.\n\n" +
 		"  simple-router init                       # ./master.key and ./config.yaml\n" +
 		"  simple-router init -c /etc/simple-router/config.yaml --master-key-file /etc/simple-router/master.key",
@@ -63,7 +70,11 @@ var initCmd = &cobra.Command{
 			return err
 		}
 		f.SetScalar("master_key_check", ci.KeyCheck(), keyCheckComment)
-		if err := f.SetMapping("server", map[string]string{"listen": initListen}); err != nil {
+		server := map[string]any{"listen": initListen}
+		if !initNoTLS {
+			server["tls"] = map[string]string{"mode": config.TLSSelfSigned}
+		}
+		if err := f.SetMapping("server", server); err != nil {
 			return err
 		}
 		if err := f.AddAPIKey(configfile.APIKey{Name: "admin", Hash: auth.Hash(adminKey), Models: []string{"*"}, Admin: true}); err != nil {
@@ -83,6 +94,13 @@ var initCmd = &cobra.Command{
 		fmt.Fprintf(e, "\nNext:\n  export SIMPLE_ROUTER_MASTER_KEY_FILE=%s\n", absKey)
 		fmt.Fprintf(e, "  simple-router -c %s provider add <name> --base-url <url>\n", cfgPath)
 		fmt.Fprintf(e, "  # add models[] to %s, then: simple-router -c %s serve\n", cfgPath, cfgPath)
+		if !initNoTLS {
+			cert := filepath.Join(filepath.Dir(cfgPath), "tls", "selfsigned.crt")
+			fmt.Fprintf(e, "\nHTTPS: a self-signed certificate is created at %s on first start\n", cert)
+			fmt.Fprintf(e, "(covers localhost; add names with server.tls.domains). Clients trust it, e.g.\n")
+			fmt.Fprintf(e, "  curl --cacert %s https://localhost%s/healthz\n", cert, portOf(initListen))
+			fmt.Fprintf(e, "Plain HTTP instead: set server.tls.mode: off (or run init --no-tls).\n")
+		}
 		return nil
 	},
 }
@@ -341,6 +359,7 @@ func writeNewSecretFile(path, content string) error {
 
 func init() {
 	initCmd.Flags().StringVar(&initListen, "listen", ":8080", "server.listen for the starter config")
+	initCmd.Flags().BoolVar(&initNoTLS, "no-tls", false, "write a plain-HTTP config (default: HTTPS with a self-signed certificate)")
 	rotateMasterCmd.Flags().StringVar(&rotateOut, "out", "", "file for the new master key (default: replace the current --master-key-file; with --api: print it)")
 	rotateMasterCmd.Flags().BoolVar(&rotateViaAPI, "api", false, "ask a running router to rotate (POST /admin/rotate-master-key)")
 	rotateMasterCmd.Flags().StringVar(&rotateAPIURL, "url", "", "with --api: router base URL (default: from server.listen)")
@@ -348,4 +367,12 @@ func init() {
 	addClientTLSFlags(rotateMasterCmd)
 	rotateProviderCmd.Flags().StringVar(&rotateProviderKey, "api-key", "", "new provider API key (prompted or read from stdin if omitted)")
 	rotateCmd.AddCommand(rotateMasterCmd, rotateKeyCmd, rotateProviderCmd)
+}
+
+// portOf returns ":port" from a listen address, or "" if it has none.
+func portOf(listen string) string {
+	if _, port, err := net.SplitHostPort(listen); err == nil && port != "" {
+		return ":" + port
+	}
+	return ""
 }

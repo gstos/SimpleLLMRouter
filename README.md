@@ -55,7 +55,7 @@ go build -o bin/simple-router .
 ## Quick start
 
 ```sh
-simple-router init                           # master.key + config.yaml + admin key (printed once)
+simple-router init                           # master.key + config.yaml (HTTPS, self-signed) + admin key (printed once)
 export SIMPLE_ROUTER_MASTER_KEY_FILE=$PWD/master.key
 
 simple-router provider add openai --base-url https://api.openai.com/v1   # prompts for the key (hidden)
@@ -66,11 +66,18 @@ simple-router serve
 ```
 
 ```sh
-curl localhost:8080/api/v1/chat/completions -H "Authorization: Bearer $CLIENT_KEY" \
+curl --cacert tls/selfsigned.crt https://localhost:8080/api/v1/chat/completions \
+  -H "Authorization: Bearer $CLIENT_KEY" \
   -d '{"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "Hi"}]}'
 ```
 
-Any OpenAI or OpenRouter SDK works: point its base URL at `http://localhost:8080/api/v1` (or `/v1`).
+The starter config serves HTTPS with a self-signed certificate, created on first start in `tls/`
+next to the config. It covers `localhost`, `127.0.0.1` and `::1`; add other names with
+`server.tls.domains` (see [HTTPS](#https)), and have clients trust `tls/selfsigned.crt`. For plain
+HTTP (e.g. behind a reverse proxy that terminates TLS), run `init --no-tls` or set
+`server.tls.mode: off`.
+
+Any OpenAI or OpenRouter SDK works: point its base URL at `https://localhost:8080/api/v1` (or `/v1`).
 
 ## Configuration
 
@@ -152,7 +159,7 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 | Command | Does |
 |---|---|
 | `serve [--watch=false] [--master-key-stdin] [--allow-remote-key-admin] [--lego PATH]` | Run the router. `--lego` (env `SIMPLE_ROUTER_LEGO`) picks the lego binary for TLS mode `acme`. |
-| `init [--listen ADDR]` | First use: creates the master key file (0600), a starter config with `master_key_check`, and an `admin` client key (printed once). Never overwrites. |
+| `init [--listen ADDR] [--no-tls]` | First use: creates the master key file (0600), a starter config with `master_key_check` and HTTPS with a self-signed certificate (`--no-tls`: plain HTTP), and an `admin` client key (printed once). Never overwrites. |
 | `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S] [--session-header H] [--auth managed\|passthrough]` | Encrypts the provider key with the master key and adds the provider. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
 | `key add <name> [--models a,b*] [--admin] [--providers p,q*]` | Generates a client key, stores only its hash, prints the key once. Default access: all models, no `/provider/` access. |
@@ -385,7 +392,8 @@ router, until the key is posted:
 ```sh
 simple-router unseal                                 # prompts for the master key and an admin client key
 docker exec -it <container> simple-router unseal     # same, inside the container
-curl -X POST localhost:8080/admin/unseal -H "Authorization: Bearer $ADMIN_KEY" -d '{"master_key":"..."}'
+curl --cacert tls/selfsigned.crt -X POST https://localhost:8080/admin/unseal \
+  -H "Authorization: Bearer $ADMIN_KEY" -d '{"master_key":"..."}'
 ```
 
 The key then lives only in the router's memory. A key file that appears later (e.g. a secret

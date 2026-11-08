@@ -75,3 +75,11 @@ func TestCertNameSkipsInvalidCertificates(t *testing.T) {
 		t.Fatalf("not-yet-valid certificate used as ServerName: %q", n)
 	}
 }
+
+func TestPortOf(t *testing.T) {
+	for in, want := range map[string]string{":8080": ":8080", "127.0.0.1:9000": ":9000", "[::1]:443": ":443", "bad": ""} {
+		if got := portOf(in); got != want {
+			t.Errorf("portOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
