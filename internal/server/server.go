@@ -152,6 +152,13 @@ func (s *Server) Handler() http.Handler {
 // authenticate returns the current snapshot and the caller's key, or writes a 401.
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*snapshot, *auth.Key) {
 	snap := s.cur.Load()
+	return snap, snap.authenticate(w, r)
+}
+
+// authenticate checks a key against this snapshot without loading another one.
+// Handlers that already selected a config must keep using its authentication
+// rules as well, even if a reload happens while the request is in flight.
+func (snap *snapshot) authenticate(w http.ResponseWriter, r *http.Request) *auth.Key {
 	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if token == "" {
 		token = r.Header.Get("X-Api-Key")
@@ -160,7 +167,7 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*snapshot
 	if k == nil {
 		writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 	}
-	return snap, k
+	return k
 }
 
 // ready is authenticate plus a 503 while sealed.
