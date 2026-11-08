@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -126,12 +128,16 @@ func keyAdminCall(cmd *cobra.Command, path, baseURL, apiKey string, payload map[
 }
 
 func isLocalURL(u string) bool {
-	for _, h := range []string{"://127.", "://localhost", "://[::1]"} {
-		if strings.Contains(u, h) {
-			return true
-		}
+	parsed, err := url.Parse(u)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
 	}
-	return false
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func init() {
