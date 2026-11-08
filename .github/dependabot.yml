@@ -1,0 +1,42 @@
+# Dependabot version updates. Security updates (for known vulnerabilities) are
+# enabled in the repository settings and open PRs regardless of this schedule.
+version: 2
+
+updates:
+  # Go modules (go.mod / go.sum).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      # One PR for all minor/patch bumps; majors get their own PRs.
+      go-minor-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 5
+
+  # Actions used by .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  # Base images in the Dockerfile (golang, distroless).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      docker-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: docker
