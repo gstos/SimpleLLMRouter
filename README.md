@@ -600,6 +600,15 @@ To run the ACME test locally, install lego v5, `pebble` and `pebble-challtestsrv
 `go build -o bin/simple-router . && scripts/e2e-acme.sh bin/simple-router`.
 To try the release build locally: `go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean`.
 
+## Intended use
+
+> [!WARNING]
+> **simple-router is meant to be an internal tool**: a gateway for your own apps, services and
+> network (a homelab, a team, a VPC). It is **not** built to route requests from the open internet.
+> It has no rate limiting, quotas, abuse protection or DDoS hardening, and `auth: passthrough`
+> providers accept requests without router authentication. Keep it on a private network, restrict
+> clients with [`server.allow_cidrs`](#client-allowlist), and don't expose it publicly.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
