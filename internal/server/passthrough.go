@@ -42,12 +42,19 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "bad base_url")
 		return
 	}
+	if r.ContentLength > snap.cfg.Server.MaxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	// Apply the limit even when the client supplies its own session header.
+	// Unknown-length bodies remain streamed, bounded by MaxBytesReader.
+	r.Body = http.MaxBytesReader(w, r.Body, snap.cfg.Server.MaxBodyBytes)
 
 	session := ""
 	if h := p.SessionHeader; h != "" {
 		session = r.Header.Get(h) // the client's own id wins
 		if session == "" {
-			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, snap.cfg.Server.MaxBodyBytes))
+			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				status := http.StatusBadRequest
 				var tooBig *http.MaxBytesError
@@ -61,8 +68,6 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 			r.ContentLength = int64(len(body))
 			session = passSession(p.Name, body)
 		}
-	} else {
-		r.Body = http.MaxBytesReader(w, r.Body, snap.cfg.Server.MaxBodyBytes)
 	}
 
 	status := http.StatusBadGateway
@@ -87,6 +92,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				status = http.StatusRequestEntityTooLarge
+				writeError(w, status, "request body too large")
+				return
+			}
 			s.log.Warn("passthrough upstream error", "provider", p.Name, "path", "/"+rest, "err", err)
 			writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		},
