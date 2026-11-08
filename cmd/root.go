@@ -4,6 +4,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -46,7 +47,7 @@ func init() {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	v.AutomaticEnv()
 
-	rootCmd.AddCommand(serveCmd, keygenCmd, encryptCmd, apikeyCmd, healthCmd, validateCmd, pingCmd, keyCmd, providerCmd, initCmd, rotateCmd)
+	rootCmd.AddCommand(serveCmd, keygenCmd, encryptCmd, apikeyCmd, healthCmd, validateCmd, pingCmd, keyCmd, providerCmd, initCmd, rotateCmd, unsealCmd)
 }
 
 // loadConfig reads, defaults and validates the config file (secrets stay encrypted).
@@ -68,11 +69,16 @@ func loadConfig() (*config.Config, error) {
 
 // loadDecryptedConfig loads the config and decrypts provider credentials.
 func loadDecryptedConfig() (*config.Config, error) {
-	cfg, err := loadConfig()
+	ci, err := masterCipher()
 	if err != nil {
 		return nil, err
 	}
-	ci, err := masterCipher()
+	return loadDecryptedConfigWith(ci)
+}
+
+// loadDecryptedConfigWith loads the config and decrypts it with ci.
+func loadDecryptedConfigWith(ci *secrets.Cipher) (*config.Config, error) {
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -84,19 +90,35 @@ func loadDecryptedConfig() (*config.Config, error) {
 
 var errNoMasterKey = errors.New("master key required: set --master-key, --master-key-file, SIMPLE_ROUTER_MASTER_KEY or SIMPLE_ROUTER_MASTER_KEY_FILE")
 
-func masterCipher() (*secrets.Cipher, error) {
+// masterKey returns the master key from --master-key / SIMPLE_ROUTER_MASTER_KEY,
+// else from the key file. A missing key file wraps fs.ErrNotExist.
+func masterKey() (string, error) {
 	key := v.GetString("master_key")
 	if key == "" {
 		if f := v.GetString("master_key_file"); f != "" {
 			b, err := os.ReadFile(f)
 			if err != nil {
-				return nil, fmt.Errorf("reading master key file: %w", err)
+				return "", fmt.Errorf("reading master key file: %w", err)
 			}
 			key = string(b)
 		}
 	}
 	if strings.TrimSpace(key) == "" {
-		return nil, errNoMasterKey
+		return "", errNoMasterKey
+	}
+	return key, nil
+}
+
+func masterCipher() (*secrets.Cipher, error) {
+	key, err := masterKey()
+	if err != nil {
+		return nil, err
 	}
 	return secrets.New(key)
+}
+
+// noKeyConfigured reports whether err means "no master key available" (none
+// set, or the configured file doesn't exist) rather than a bad key.
+func noKeyConfigured(err error) bool {
+	return errors.Is(err, errNoMasterKey) || errors.Is(err, fs.ErrNotExist)
 }

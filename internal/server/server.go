@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gstos/SimpleLLMRouter/internal/auth"
@@ -23,25 +25,66 @@ import (
 )
 
 type Server struct {
+	cur    atomic.Pointer[snapshot]
+	client *http.Client
+	log    *slog.Logger
+	opts   Options
+}
+
+// Options configures optional server behaviour.
+type Options struct {
+	// Unseal receives a master key posted to /admin/unseal. It returns an error
+	// wrapping ErrKeyRejected when the key is wrong. Nil disables the endpoint.
+	Unseal func(ctx context.Context, masterKey string) error
+	// Rotate re-encrypts everything under newKey (generated when empty) after
+	// checking currentKey, and returns the new key. Errors wrapping
+	// ErrKeyRejected mean currentKey was wrong. Nil disables the endpoint.
+	Rotate func(ctx context.Context, currentKey, newKey string) (string, error)
+	// AllowRemoteKeyAdmin accepts /admin/unseal and /admin/rotate-master-key from
+	// non-loopback clients. Keys travel in the request body: only behind TLS.
+	AllowRemoteKeyAdmin bool
+}
+
+// ErrKeyRejected marks an unseal attempt with a wrong or malformed master key.
+var ErrKeyRejected = errors.New("master key rejected")
+
+// snapshot is one loaded config. A request uses a single snapshot from start to
+// end, so a reload never changes the rules under an in-flight request.
+// A sealed snapshot (router == nil) has client keys but no decrypted credentials.
+type snapshot struct {
 	cfg     *config.Config
 	keys    *auth.Store
 	router  *router.Router
 	checker *health.Checker
-	client  *http.Client
-	log     *slog.Logger
 }
 
-func New(cfg *config.Config, rt *router.Router, checker *health.Checker, log *slog.Logger) *Server {
-	return &Server{
-		cfg:     cfg,
-		keys:    auth.NewStore(cfg.APIKeys),
-		router:  rt,
-		checker: checker,
+func (s *snapshot) sealed() bool { return s.router == nil }
+
+// New returns a server with no config; call Update or Seal before serving.
+func New(log *slog.Logger, opts Options) *Server {
+	s := &Server{
 		// No client-level timeout: streams can be long. The per-request context bounds it.
 		client: &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()},
 		log:    log,
+		opts:   opts,
 	}
+	s.Seal(&config.Config{})
+	return s
 }
+
+// Update atomically switches to a new, decrypted config (startup, reload, unseal).
+func (s *Server) Update(cfg *config.Config, rt *router.Router, checker *health.Checker) {
+	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys), router: rt, checker: checker})
+}
+
+// Seal serves cfg's client keys without credentials: API calls get 503 until a
+// master key arrives via /admin/unseal.
+func (s *Server) Seal(cfg *config.Config) {
+	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys)})
+}
+
+// Sealed reports whether the server is waiting for a master key.
+func (s *Server) Sealed() bool { return s.cur.Load().sealed() }
 
 // Handler returns the HTTP handler. Every API route is served under both
 // /api/v1 (OpenRouter style) and /v1 (OpenAI style).
@@ -56,32 +99,141 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET "+prefix+"/models", s.models)
 	}
 	mux.HandleFunc("GET /admin/health", s.adminHealth)
+	mux.HandleFunc("POST /admin/unseal", s.unseal)
+	mux.HandleFunc("POST /admin/rotate-master-key", s.rotate)
+	// Liveness: 200 even while sealed (body "sealed"), so orchestrators don't
+	// restart a router that is only waiting for its key.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if s.Sealed() {
+			_, _ = io.WriteString(w, "sealed\n")
+			return
+		}
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	return mux
 }
 
-func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) *auth.Key {
+// authenticate returns the current snapshot and the caller's key, or writes a 401.
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*snapshot, *auth.Key) {
+	snap := s.cur.Load()
 	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if token == "" {
 		token = r.Header.Get("X-Api-Key")
 	}
-	k := s.keys.Lookup(token)
+	k := snap.keys.Lookup(token)
 	if k == nil {
 		writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 	}
-	return k
+	return snap, k
+}
+
+// ready is authenticate plus a 503 while sealed.
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) (*snapshot, *auth.Key) {
+	snap, key := s.authenticate(w, r)
+	if key != nil && snap.sealed() {
+		writeError(w, http.StatusServiceUnavailable, "router is sealed: waiting for the master key")
+		return nil, nil
+	}
+	return snap, key
+}
+
+// unseal accepts the master key: {"master_key": "<base64>"}. Admin key required.
+// It also applies a new key to an unsealed router (live master key rotation).
+func (s *Server) unseal(w http.ResponseWriter, r *http.Request) {
+	key, body := s.keyAdmin(w, r, s.opts.Unseal != nil)
+	if key == nil {
+		return
+	}
+	if err := s.opts.Unseal(r.Context(), body.MasterKey); err != nil {
+		if errors.Is(err, ErrKeyRejected) {
+			s.log.Warn("unseal rejected", "key", key.Name, "remote", r.RemoteAddr, "err", err)
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.log.Info("unsealed", "key", key.Name, "remote", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "unsealed"})
+}
+
+// rotate: {"master_key": "<current>", "new_master_key": "<optional>"} -> {"master_key": "<new>"}.
+// The current key is required, so an admin client key alone can neither learn
+// nor change the master key.
+func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
+	key, body := s.keyAdmin(w, r, s.opts.Rotate != nil)
+	if key == nil {
+		return
+	}
+	if s.Sealed() {
+		writeError(w, http.StatusServiceUnavailable, "router is sealed: unseal before rotating")
+		return
+	}
+	newKey, err := s.opts.Rotate(r.Context(), body.MasterKey, body.NewMasterKey)
+	if err != nil {
+		if errors.Is(err, ErrKeyRejected) {
+			s.log.Warn("master key rotation rejected", "key", key.Name, "remote", r.RemoteAddr, "err", err)
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		s.log.Error("master key rotation failed", "key", key.Name, "err", err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.log.Info("master key rotated", "key", key.Name, "remote", r.RemoteAddr)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"status": "rotated", "master_key": newKey})
+}
+
+type keyAdminBody struct {
+	MasterKey    string `json:"master_key"`
+	NewMasterKey string `json:"new_master_key"`
+}
+
+// keyAdmin applies the checks shared by the master key endpoints: enabled,
+// localhost (unless allowed), admin client key, and a JSON body with master_key.
+func (s *Server) keyAdmin(w http.ResponseWriter, r *http.Request, enabled bool) (*auth.Key, *keyAdminBody) {
+	if !enabled {
+		writeError(w, http.StatusNotFound, "endpoint disabled")
+		return nil, nil
+	}
+	if !s.opts.AllowRemoteKeyAdmin && !isLoopback(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "only accepted from localhost (start serve with --allow-remote-key-admin, behind TLS)")
+		return nil, nil
+	}
+	_, key := s.authenticate(w, r)
+	if key == nil {
+		return nil, nil
+	}
+	if !key.Admin {
+		writeError(w, http.StatusForbidden, "admin key required")
+		return nil, nil
+	}
+	var body keyAdminBody
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || body.MasterKey == "" {
+		writeError(w, http.StatusBadRequest, `expected {"master_key": "..."}`)
+		return nil, nil
+	}
+	return key, &body
+}
+
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key := s.authenticate(w, r)
+		snap, key := s.ready(w, r)
 		if key == nil {
 			return
 		}
 
-		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.Server.MaxBodyBytes))
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, snap.cfg.Server.MaxBodyBytes))
 		if err != nil {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large or unreadable")
 			return
@@ -97,7 +249,7 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 			return
 		}
 
-		rt, ok := s.router.Route(model)
+		rt, ok := snap.router.Route(model)
 		if !ok || !key.Allows(model) {
 			// Same answer for unknown and forbidden so keys can't enumerate models.
 			writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", model))
@@ -108,11 +260,11 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Server.RequestTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), snap.cfg.Server.RequestTimeout)
 		defer cancel()
 
 		sticky := stickyKey(key.Name, model, r, body)
-		plan := s.router.Plan(rt, sticky)
+		plan := snap.router.Plan(rt, sticky)
 		var lastErr string
 		var lastResp *capturedResponse
 
@@ -130,7 +282,7 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 					return
 				}
 				attempt.Warn("upstream error", "err", err, "elapsed", time.Since(start))
-				s.router.Failure(t)
+				snap.router.Failure(t)
 				lastErr = err.Error()
 				if ctx.Err() != nil {
 					break // overall timeout: no time left for further attempts
@@ -140,13 +292,13 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 			if retryable(resp.StatusCode) {
 				cr := capture(resp)
 				attempt.Warn("upstream failed, trying next", "status", resp.StatusCode, "elapsed", time.Since(start))
-				s.router.Failure(t)
+				snap.router.Failure(t)
 				lastResp, lastErr = cr, fmt.Sprintf("upstream status %d", resp.StatusCode)
 				continue
 			}
 
 			if resp.StatusCode < 300 {
-				s.router.Success(sticky, t)
+				snap.router.Success(sticky, t)
 			}
 			attempt.Info("proxied", "status", resp.StatusCode, "elapsed", time.Since(start))
 			s.relay(w, resp, t)
@@ -267,12 +419,12 @@ type modelEntry struct {
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
-	key := s.authenticate(w, r)
+	snap, key := s.ready(w, r)
 	if key == nil {
 		return
 	}
 	data := []modelEntry{}
-	for _, rt := range s.router.Models() {
+	for _, rt := range snap.router.Models() {
 		if key.Allows(rt.Name) {
 			data = append(data, modelEntry{ID: rt.Name, Object: "model", Type: rt.Type, OwnedBy: "simple-router"})
 		}
@@ -283,7 +435,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 // adminHealth returns provider health. ?refresh=1 probes now instead of returning
 // the last background results.
 func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
-	key := s.authenticate(w, r)
+	snap, key := s.authenticate(w, r)
 	if key == nil {
 		return
 	}
@@ -291,9 +443,13 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "admin key required")
 		return
 	}
-	results := s.checker.Last()
+	if snap.sealed() {
+		writeError(w, http.StatusServiceUnavailable, "router is sealed: waiting for the master key")
+		return
+	}
+	results := snap.checker.Last()
 	if r.URL.Query().Get("refresh") != "" || len(results) == 0 {
-		results = s.checker.CheckAll(r.Context())
+		results = snap.checker.CheckAll(r.Context())
 	}
 	status := http.StatusOK
 	for _, res := range results {

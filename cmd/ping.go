@@ -23,11 +23,11 @@ var pingCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		url := pingURL
 		if url == "" {
-			cfg, err := loadConfig()
+			base, err := localBaseURL()
 			if err != nil {
 				return err
 			}
-			url = "http://" + loopback(cfg.Server.Listen) + "/healthz"
+			url = base + "/healthz"
 		}
 		client := &http.Client{Timeout: pingTimeout}
 		resp, err := client.Get(url)
@@ -42,6 +42,16 @@ var pingCmd = &cobra.Command{
 		fmt.Fprintln(cmd.OutOrStdout(), "ok")
 		return nil
 	},
+}
+
+// localBaseURL is the router's own address from server.listen, via loopback.
+// It reads only the YAML (no master key needed).
+func localBaseURL() (string, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return "", err
+	}
+	return "http://" + loopback(cfg.Server.Listen), nil
 }
 
 // loopback turns a listen address like ":8080" or "0.0.0.0:8080" into a dialable local one.

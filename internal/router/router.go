@@ -37,27 +37,43 @@ type Route struct {
 type Router struct {
 	routes   map[string]*Route
 	names    []string
-	sticky   *stickyStore
 	cooldown time.Duration
 	now      func() time.Time
+	*state
+}
+
+// state is the runtime knowledge that survives config reloads: sticky pins,
+// failure cooldowns and provider health. Entries for targets or providers that
+// no longer exist are simply never matched.
+type state struct {
+	sticky *stickyStore
 
 	mu       sync.RWMutex
-	failed   map[string]time.Time // target key -> unavailable until
+	failed   map[string]time.Time // target ID -> unavailable until
 	provDown map[string]bool      // provider -> failed last active health check
 }
 
-func New(cfg *config.Config) *Router {
+// New builds a router for cfg. With prev set (a config reload), the new router
+// shares prev's runtime state so sticky sessions and cooldowns carry over.
+func New(cfg *config.Config, prev *Router) *Router {
 	provs := map[string]*config.Provider{}
 	for i := range cfg.Providers {
 		provs[cfg.Providers[i].Name] = &cfg.Providers[i]
 	}
 	r := &Router{
 		routes:   map[string]*Route{},
-		sticky:   newStickyStore(cfg.Server.StickyTTL),
 		cooldown: cfg.Server.FailureCooldown,
 		now:      time.Now,
-		failed:   map[string]time.Time{},
-		provDown: map[string]bool{},
+	}
+	if prev != nil {
+		r.state = prev.state
+		r.sticky.setTTL(cfg.Server.StickyTTL)
+	} else {
+		r.state = &state{
+			sticky:   newStickyStore(cfg.Server.StickyTTL),
+			failed:   map[string]time.Time{},
+			provDown: map[string]bool{},
+		}
 	}
 	for _, m := range cfg.Models {
 		rt := &Route{Name: m.Name, Type: m.Type, byID: map[string]*Target{}}
@@ -184,12 +200,18 @@ func newStickyStore(ttl time.Duration) *stickyStore {
 	return &stickyStore{ttl: ttl, m: map[string]stickyEntry{}, now: time.Now}
 }
 
+func (s *stickyStore) setTTL(ttl time.Duration) {
+	s.mu.Lock()
+	s.ttl = ttl
+	s.mu.Unlock()
+}
+
 func (s *stickyStore) get(key string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.ttl <= 0 {
 		return "", false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	e, ok := s.m[key]
 	if !ok || s.now().After(e.expires) {
 		delete(s.m, key)
@@ -199,11 +221,11 @@ func (s *stickyStore) get(key string) (string, bool) {
 }
 
 func (s *stickyStore) set(key, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.ttl <= 0 {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := s.now()
 	s.m[key] = stickyEntry{id: id, expires: now.Add(s.ttl)}
 	s.sets++

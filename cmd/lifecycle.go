@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -101,8 +102,14 @@ var rotateMasterCmd = &cobra.Command{
 		"master_key_check. The current key is verified first.\n\n" +
 		"If the current key came from a file, that file is replaced (the new key is written to\n" +
 		"<file>.new first, then the config, then the rename, so an interruption never loses a key).\n" +
-		"Otherwise pass --out for the new key file. Restart the server with the new key afterwards.",
+		"Otherwise pass --out for the new key file. Restart the server with the new key afterwards.\n\n" +
+		"With --api, a running router does the rotation itself (POST /admin/rotate-master-key):\n" +
+		"no restart; it replaces its key file if it uses one. The new key is written to --out,\n" +
+		"or printed if --out is not given.",
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if rotateViaAPI {
+			return rotateMasterViaAPI(cmd)
+		}
 		cfgPath := v.GetString("config")
 		f, err := configfile.Load(cfgPath)
 		if err != nil {
@@ -129,56 +136,53 @@ var rotateMasterCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		newCi, err := secrets.New(mk)
+		n, _, err := rotateMaster(f, oldCi, mk, out, inPlace, func(msg string) { fmt.Fprintln(os.Stderr, "warning:", msg) })
 		if err != nil {
 			return err
-		}
-
-		provs, err := f.List("providers")
-		if err != nil {
-			return err
-		}
-		n := 0
-		for _, p := range provs {
-			name, _ := p["name"].(string)
-			val := f.Field("providers", name, "api_key")
-			if !secrets.IsEncrypted(val) {
-				continue
-			}
-			pt, err := oldCi.Decrypt(val)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: provider %q: %v; left unchanged\n", name, err)
-				continue
-			}
-			enc, err := newCi.Encrypt(pt)
-			if err != nil {
-				return err
-			}
-			f.SetField("providers", name, "api_key", enc)
-			n++
-		}
-		f.SetScalar("master_key_check", newCi.KeyCheck(), keyCheckComment)
-
-		writePath := out
-		if inPlace {
-			writePath = out + ".new"
-		}
-		if err := writeNewSecretFile(writePath, mk+"\n"); err != nil {
-			return err
-		}
-		if err := f.Save(); err != nil {
-			os.Remove(writePath)
-			return fmt.Errorf("saving config (nothing changed): %w", err)
-		}
-		if inPlace {
-			if err := os.Rename(writePath, out); err != nil {
-				return fmt.Errorf("config now uses the key in %s, but replacing %s failed: %w", writePath, out, err)
-			}
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Re-encrypted %d provider credential(s); new master key in %s.\n", n, out)
 		fmt.Fprintln(cmd.OutOrStdout(), "Restart the server with the new key. The old key no longer decrypts this config.")
 		return nil
 	},
+}
+
+var (
+	rotateViaAPI bool
+	rotateAPIURL string
+	rotateAPIKey string
+)
+
+func rotateMasterViaAPI(cmd *cobra.Command) error {
+	current, err := interactiveMasterKey()
+	if err != nil {
+		return err
+	}
+	// Fail on an existing --out before the router rotates anything.
+	if rotateOut != "" {
+		if _, err := os.Stat(rotateOut); err == nil {
+			return fmt.Errorf("%s already exists; refusing to overwrite a key file", rotateOut)
+		}
+	}
+	out, err := keyAdminCall(cmd, "/admin/rotate-master-key", rotateAPIURL, rotateAPIKey, map[string]string{"master_key": current})
+	if err != nil {
+		return err
+	}
+	newKey, _ := out["master_key"].(string)
+	if newKey == "" {
+		return errors.New("router did not return the new master key")
+	}
+	if rotateOut == "" {
+		fmt.Fprintln(os.Stderr, "Rotated. New master key (shown once, store it now):")
+		fmt.Fprintln(cmd.OutOrStdout(), newKey)
+		return nil
+	}
+	if err := writeNewSecretFile(rotateOut, newKey+"\n"); err != nil {
+		fmt.Fprintln(os.Stderr, "Rotated, but writing the key file failed. New master key (store it now):")
+		fmt.Fprintln(cmd.OutOrStdout(), newKey)
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Rotated; new master key in %s. The router is already using it.\n", rotateOut)
+	return nil
 }
 
 var rotateKeyCmd = &cobra.Command{
@@ -251,6 +255,64 @@ var rotateProviderCmd = &cobra.Command{
 	},
 }
 
+// rotateMaster re-encrypts every provider credential in f from oldCi to newKey,
+// updates master_key_check and saves f. When keyOut is set the new key is
+// written there first; with inPlace it goes to keyOut+".new" and is renamed over
+// keyOut after the config is saved, so an interruption never loses the key that
+// matches the config. Values that can't be decrypted are left as is (warn).
+func rotateMaster(f *configfile.File, oldCi *secrets.Cipher, newKey, keyOut string, inPlace bool, warn func(string)) (int, *secrets.Cipher, error) {
+	newCi, err := secrets.New(newKey)
+	if err != nil {
+		return 0, nil, err
+	}
+	provs, err := f.List("providers")
+	if err != nil {
+		return 0, nil, err
+	}
+	n := 0
+	for _, p := range provs {
+		name, _ := p["name"].(string)
+		val := f.Field("providers", name, "api_key")
+		if !secrets.IsEncrypted(val) {
+			continue
+		}
+		pt, err := oldCi.Decrypt(val)
+		if err != nil {
+			warn(fmt.Sprintf("provider %q: %v; left unchanged", name, err))
+			continue
+		}
+		enc, err := newCi.Encrypt(pt)
+		if err != nil {
+			return 0, nil, err
+		}
+		f.SetField("providers", name, "api_key", enc)
+		n++
+	}
+	f.SetScalar("master_key_check", newCi.KeyCheck(), keyCheckComment)
+
+	writePath := keyOut
+	if inPlace {
+		writePath = keyOut + ".new"
+	}
+	if keyOut != "" {
+		if err := writeNewSecretFile(writePath, strings.TrimSpace(newKey)+"\n"); err != nil {
+			return 0, nil, err
+		}
+	}
+	if err := f.Save(); err != nil {
+		if keyOut != "" {
+			os.Remove(writePath)
+		}
+		return 0, nil, fmt.Errorf("saving config (nothing changed): %w", err)
+	}
+	if inPlace {
+		if err := os.Rename(writePath, keyOut); err != nil {
+			return n, newCi, fmt.Errorf("config now uses the key in %s, but replacing %s failed: %w", writePath, keyOut, err)
+		}
+	}
+	return n, newCi, nil
+}
+
 // writeNewSecretFile creates path with mode 0600, refusing to overwrite.
 func writeNewSecretFile(path, content string) error {
 	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -273,7 +335,10 @@ func writeNewSecretFile(path, content string) error {
 
 func init() {
 	initCmd.Flags().StringVar(&initListen, "listen", ":8080", "server.listen for the starter config")
-	rotateMasterCmd.Flags().StringVar(&rotateOut, "out", "", "file for the new master key (default: replace the current --master-key-file)")
+	rotateMasterCmd.Flags().StringVar(&rotateOut, "out", "", "file for the new master key (default: replace the current --master-key-file; with --api: print it)")
+	rotateMasterCmd.Flags().BoolVar(&rotateViaAPI, "api", false, "ask a running router to rotate (POST /admin/rotate-master-key)")
+	rotateMasterCmd.Flags().StringVar(&rotateAPIURL, "url", "", "with --api: router base URL (default: from server.listen)")
+	rotateMasterCmd.Flags().StringVar(&rotateAPIKey, "api-key", "", "with --api: admin client API key (prefer SIMPLE_ROUTER_API_KEY or the prompt)")
 	rotateProviderCmd.Flags().StringVar(&rotateProviderKey, "api-key", "", "new provider API key (prompted or read from stdin if omitted)")
 	rotateCmd.AddCommand(rotateMasterCmd, rotateKeyCmd, rotateProviderCmd)
 }

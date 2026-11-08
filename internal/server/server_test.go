@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -97,10 +99,12 @@ func setup(t *testing.T) (http.Handler, map[string]*fakeUpstream) {
 	if err := cfg.DecryptSecrets(ci); err != nil {
 		t.Fatal(err)
 	}
-	rt := router.New(cfg)
+	rt := router.New(cfg, nil)
 	ch := health.New(cfg.Providers, time.Second, func(r health.Result) { rt.SetProviderHealthy(r.Provider, r.Healthy) })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(cfg, rt, ch, log).Handler(), ups
+	srv := New(log, Options{})
+	srv.Update(cfg, rt, ch)
+	return srv.Handler(), ups
 }
 
 func do(t *testing.T, h http.Handler, key, path string, body map[string]any, hdr ...string) (*httptest.ResponseRecorder, map[string]any) {
@@ -265,5 +269,109 @@ func TestAdminHealth(t *testing.T) {
 		if out["from"] != "a" {
 			t.Fatalf("routed to %v while b is down", out["from"])
 		}
+	}
+}
+
+func TestSealedAndUnseal(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []config.Provider{{Name: "a", BaseURL: "http://a"}},
+		Models:    []config.Model{{Name: "gpt", Targets: []config.Target{{Provider: "a"}}}},
+		APIKeys: []config.APIKey{
+			{Name: "full", Hash: auth.Hash(fullKey), Admin: true},
+			{Name: "limited", Hash: auth.Hash(limitedKey)},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	var got string
+	srv := New(slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
+		Unseal: func(_ context.Context, key string) error {
+			if key != "right" {
+				return fmt.Errorf("%w: nope", ErrKeyRejected)
+			}
+			got = key
+			return nil
+		},
+	})
+	srv.Seal(cfg)
+	handler := srv.Handler()
+
+	if rec, _ := do(t, handler, fullKey, "/api/v1/chat/completions", chat("x")); rec.Code != 503 {
+		t.Fatalf("sealed chat: %d", rec.Code)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 || rec.Body.String() != "sealed\n" {
+		t.Fatalf("healthz while sealed: %d %q", rec.Code, rec.Body)
+	}
+
+	unseal := func(key, mk, remote string) int {
+		b, _ := json.Marshal(map[string]string{"master_key": mk})
+		req := httptest.NewRequest(http.MethodPost, "/admin/unseal", bytes.NewReader(b))
+		req.RemoteAddr = remote
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := unseal(fullKey, "right", "203.0.113.5:4000"); c != 403 {
+		t.Fatalf("remote unseal: %d", c)
+	}
+	if c := unseal(limitedKey, "right", "127.0.0.1:4000"); c != 403 {
+		t.Fatalf("non-admin unseal: %d", c)
+	}
+	if c := unseal("bogus", "right", "127.0.0.1:4000"); c != 401 {
+		t.Fatalf("bad client key: %d", c)
+	}
+	if c := unseal(fullKey, "wrong", "[::1]:4000"); c != 422 {
+		t.Fatalf("wrong master key: %d", c)
+	}
+	if c := unseal(fullKey, "right", "127.0.0.1:4000"); c != 200 || got != "right" {
+		t.Fatalf("unseal: %d", c)
+	}
+}
+
+func TestRotateEndpoint(t *testing.T) {
+	cfg := &config.Config{APIKeys: []config.APIKey{{Name: "full", Hash: auth.Hash(fullKey), Admin: true}}}
+	cfg.ApplyDefaults()
+	srv := New(slog.New(slog.NewTextHandler(io.Discard, nil)), Options{
+		Rotate: func(_ context.Context, cur, newKey string) (string, error) {
+			if cur != "current" {
+				return "", fmt.Errorf("%w: nope", ErrKeyRejected)
+			}
+			if newKey == "" {
+				newKey = "generated"
+			}
+			return newKey, nil
+		},
+	})
+	srv.Seal(cfg)
+	h := srv.Handler()
+	call := func(body map[string]string) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/admin/rotate-master-key", bytes.NewReader(b))
+		req.RemoteAddr = "127.0.0.1:1"
+		req.Header.Set("Authorization", "Bearer "+fullKey)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := call(map[string]string{"master_key": "current"}); rec.Code != 503 {
+		t.Fatalf("rotate while sealed: %d", rec.Code)
+	}
+	srv.Update(cfg, router.New(cfg, nil), health.New(nil, time.Second, nil))
+	if rec := call(map[string]string{"new_master_key": "x"}); rec.Code != 400 {
+		t.Fatalf("missing current key: %d", rec.Code)
+	}
+	if rec := call(map[string]string{"master_key": "wrong"}); rec.Code != 422 {
+		t.Fatalf("wrong current key: %d", rec.Code)
+	}
+	rec := call(map[string]string{"master_key": "current"})
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"master_key":"generated"`) || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("rotate: %d %s %q", rec.Code, rec.Body, rec.Header().Get("Cache-Control"))
+	}
+	if rec := call(map[string]string{"master_key": "current", "new_master_key": "mine"}); !strings.Contains(rec.Body.String(), `"master_key":"mine"`) {
+		t.Fatalf("caller-supplied key: %s", rec.Body)
 	}
 }

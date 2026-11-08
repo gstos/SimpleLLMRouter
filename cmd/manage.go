@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"strings"
@@ -277,36 +278,54 @@ func verifiedCipher(f *configfile.File) (*secrets.Cipher, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := verifyCipher(f, ci); err != nil {
+		return nil, err
+	}
+	return ci, nil
+}
+
+// verifyCipher checks ci against master_key_check and the existing encrypted
+// values. Errors wrap config.ErrWrongMasterKey.
+func verifyCipher(f *configfile.File, ci *secrets.Cipher) error {
 	if check := f.Scalar("master_key_check"); check != "" && !ci.VerifyKeyCheck(check) {
-		return nil, config.ErrWrongMasterKey
+		return config.ErrWrongMasterKey
 	}
 	provs, err := f.List("providers")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, p := range provs {
 		if v, _ := p["api_key"].(string); secrets.IsEncrypted(v) {
 			// Only authentication failures prove a wrong key; malformed placeholders are skipped.
 			if _, err := ci.Decrypt(v); errors.Is(err, secrets.ErrDecrypt) {
-				return nil, fmt.Errorf("wrong master key: it cannot decrypt the api_key of provider %q", p["name"])
+				return fmt.Errorf("%w (it cannot decrypt the api_key of provider %q)", config.ErrWrongMasterKey, p["name"])
 			}
 		}
 	}
-	return ci, nil
+	return nil
 }
 
 // interactiveCipher is masterCipher, but prompts for the master key (hidden)
 // when none is configured and stdin is a terminal.
 func interactiveCipher() (*secrets.Cipher, error) {
-	ci, err := masterCipher()
-	if !errors.Is(err, errNoMasterKey) || !stdinIsTerminal() {
-		return ci, err
-	}
-	key, err := readSecret(os.Stdin, "Master key: ")
+	key, err := interactiveMasterKey()
 	if err != nil {
 		return nil, err
 	}
 	return secrets.New(key)
+}
+
+// interactiveMasterKey is masterKey, falling back to a hidden prompt on a
+// terminal when no key is set or the configured key file doesn't exist.
+func interactiveMasterKey() (string, error) {
+	key, err := masterKey()
+	if !noKeyConfigured(err) || !stdinIsTerminal() {
+		return key, err
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "(master key file %s not found)\n", v.GetString("master_key_file"))
+	}
+	return readSecret(os.Stdin, "Master key: ")
 }
 
 func stdinIsTerminal() bool { return term.IsTerminal(int(os.Stdin.Fd())) }

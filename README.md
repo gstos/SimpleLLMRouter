@@ -41,9 +41,49 @@ Restart the server after changes.
 | `rotate provider <name> [--api-key K]` | Replaces an upstream credential (prompted/piped like `provider add`). |
 | `encrypt`, `apikey` | Lower-level: print an encrypted value / a key+hash without touching the config. |
 
-The master key can also come from `SIMPLE_ROUTER_MASTER_KEY` or `SIMPLE_ROUTER_MASTER_KEY_FILE`.
-The server will not start without it, or if any credential fails to decrypt.
 Config values can be overridden by env, e.g. `SIMPLE_ROUTER_SERVER_LISTEN=:9000`.
+
+## Master key
+
+`serve` gets the master key from, in order:
+
+| Source | Lifetime |
+|---|---|
+| `--master-key-file` / `SIMPLE_ROUTER_MASTER_KEY_FILE` | re-read on every reload (a key file rotated with the CLI applies live) |
+| `--master-key` / `SIMPLE_ROUTER_MASTER_KEY` | read once at startup, then only kept in memory (the env var is removed from the process environment; `docker inspect` still shows it, so prefer the others) |
+| `--master-key-stdin` | read once, in memory only |
+| **none of the above** | the router starts **sealed** and waits for the key over the API |
+
+A key that is provided but wrong is a startup error.
+
+**Sealed mode.** API calls get `503` and `/healthz` answers `sealed` (still 200, so orchestrators
+don't restart it) until the key is posted:
+
+```sh
+simple-router unseal                                   # prompts for the master key and an admin client key
+docker exec -it <container> simple-router unseal       # same, inside the container
+curl -X POST localhost:8080/admin/unseal -H "Authorization: Bearer $ADMIN_KEY" -d '{"master_key":"..."}'
+```
+
+The key then lives only in the router's memory. A key file that appears later (e.g. a secret mounted
+afterwards) also unseals it.
+
+**Live rotation.** `simple-router rotate master-key --api [--out new.key]` asks the running router
+to rotate: it verifies the current key, re-encrypts the credentials, saves the config and switches
+over without a restart, returning the new key once. If the router uses a key file it replaces it
+safely; a read-only one (e.g. a Docker secret) makes it refuse, with nothing changed. The endpoint
+requires the **current master key** as well as an admin client key, so a leaked client key can
+neither read nor change the master key. Without `--api`, `rotate master-key` works on the files
+directly (the router picks up a rotated key file automatically).
+
+Both `/admin/unseal` and `/admin/rotate-master-key` accept only localhost clients unless `serve` runs
+with `--allow-remote-key-admin`; enable that only behind TLS, since the key is in the request body.
+Behind a reverse proxy on the same host every request looks local, so keep these paths off the proxy.
+
+**Process hardening.** At startup `serve` disables core dumps and, on Linux, marks itself
+non-dumpable, so other processes of the same user can't attach to it or read its memory. This
+doesn't stop root on the host: the master key and decrypted provider credentials necessarily live
+in the router's memory. Encryption protects the config at rest (backups, git, snapshots).
 
 ## API
 
@@ -57,9 +97,24 @@ Served under both `/api/v1` (OpenRouter) and `/v1` (OpenAI). Auth: `Authorizatio
 | POST | `/rerank` | rerank |
 | GET | `/models` | lists the models the key can use |
 | GET | `/admin/health[?refresh=1]` | provider health; admin keys only (503 if any provider is down) |
-| GET | `/healthz` | router liveness, no auth |
+| POST | `/admin/unseal` | `{"master_key"}`; admin key, localhost only (see [Master key](#master-key)) |
+| POST | `/admin/rotate-master-key` | `{"master_key", "new_master_key"?}` → new key; admin key, localhost only |
+| GET | `/healthz` | router liveness, no auth (`ok` or `sealed`) |
 
 Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
+
+## Hot reload
+
+`serve` reloads the config without dropping connections:
+
+- automatically when `config.yaml` or the master key file changes (disable with `--watch=false`);
+- on `SIGHUP` (`docker kill -s HUP <container>`).
+
+The master key file is re-read too, so a key file rotated with the CLI applies live; without a
+key file, reloads use the in-memory key. A config that fails to
+parse, validate or decrypt is logged and ignored; the running one keeps serving. In-flight requests
+finish on the config they started with; sticky sessions, cooldowns and health state carry over.
+`server.listen` changes need a restart.
 
 ## Routing
 
@@ -77,7 +132,7 @@ Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
 ## CLI
 
 `serve`, `health` (probe all providers; exits non-zero if any is down, `--json`), `validate`,
-`ping`, `init`, `rotate master-key|key|provider`, `keygen`, `encrypt`, `apikey`,
+`ping`, `unseal`, `init`, `rotate master-key|key|provider`, `keygen`, `encrypt`, `apikey`,
 `provider add|list|remove`, `key add|list|remove`.
 
 ## Docker
@@ -96,11 +151,25 @@ To build locally:
 
 ```sh
 docker build -t simple-router .
+
+# Key never on disk in the container: start sealed, then unseal.
+docker run -d --name router -p 8080:8080 -v $PWD/conf:/etc/simple-router simple-router
+docker exec -it router simple-router unseal
+
+# Or with a key file (Docker/Compose secret, in-memory filesystem):
 docker run -d -p 8080:8080 \
-  -v $PWD/config.yaml:/etc/simple-router/config.yaml:ro \
+  -v $PWD/conf:/etc/simple-router \
   -v $PWD/master.key:/run/secrets/master_key:ro \
   simple-router
 ```
+
+`/etc/simple-router` is a declared volume holding `config.yaml`. Mount the **directory**, not the
+file: edits (including the CLI helpers) replace the file atomically, and a single-file bind mount
+keeps showing the old one, so hot reload would never see the change.
+
+If nothing is mounted at `/run/secrets/master_key` (and `SIMPLE_ROUTER_MASTER_KEY` is unset), the
+container starts sealed. Live rotation over the API needs the sealed setup (or a writable key
+file): a read-only secret can't be replaced by the router.
 
 The image is distroless and runs as non-root. Its `HEALTHCHECK` runs `simple-router ping`, which
 calls `/healthz` over loopback on the port from `server.listen` (no master key needed; override
