@@ -198,9 +198,11 @@ var serveCmd = &cobra.Command{
 		setACMEEnv(cfg, inst != nil)
 		var runner *acme.Runner
 		if tlsCfg.Mode == config.TLSACME {
+			acmeCfg := tlsCfg.ACME
+			acmeCfg.CAFile = resolvePath(cfgDir, acmeCfg.CAFile)
 			runner = &acme.Runner{
 				Lego:     legoBin,
-				Cfg:      tlsCfg.ACME,
+				Cfg:      acmeCfg,
 				LegoPath: tlsconf.LegoPath(tlsDir),
 				Webroot:  webroot,
 				CertName: tlsconf.ACMECertName,
