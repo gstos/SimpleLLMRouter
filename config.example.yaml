@@ -1,0 +1,70 @@
+# simple-router example configuration.
+#
+#   simple-router keygen > master.key                       # once; keep it secret
+#   printf %s "$OPENAI_API_KEY" | simple-router encrypt --master-key-file master.key
+#   simple-router apikey                                    # client key + hash
+#   simple-router serve -c config.yaml --master-key-file master.key
+
+server:
+  listen: ":8080"
+  request_timeout: 5m      # whole request, including all failover attempts
+  max_body_bytes: 33554432 # 32 MiB
+  sticky_ttl: 10m          # how long a conversation stays pinned to a provider (sliding); negative disables
+  failure_cooldown: 30s    # a failed target is deprioritised for this long
+  health_interval: 60s     # background provider probes; 0 disables
+  health_timeout: 10s
+
+providers:
+  - name: openai
+    base_url: https://api.openai.com/v1
+    api_key: enc:v1:REPLACE_ME
+  - name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key: enc:v1:REPLACE_ME
+    headers:
+      X-Title: simple-router
+  - name: azure
+    base_url: https://my-resource.openai.azure.com/openai/v1
+    api_key: enc:v1:REPLACE_ME
+    auth_header: api-key
+    auth_scheme: none       # send the raw key, no "Bearer "
+  - name: cohere
+    base_url: https://api.cohere.com/v2
+    api_key: enc:v1:REPLACE_ME
+    paths:
+      rerank: /rerank
+      health: /models
+  - name: local-vllm         # no api_key: no auth header is sent
+    base_url: http://localhost:8000/v1
+
+models:
+  - name: openai/gpt-4o      # the id clients send
+    type: chat               # chat (default) | embedding | rerank
+    targets:
+      - { provider: openai, model: gpt-4o,        priority: 1 }  # 1 and 1: round robin
+      - { provider: azure,  model: gpt-4o,        priority: 1 }
+      - { provider: openrouter, model: openai/gpt-4o, priority: 2 }  # fallback
+
+  - name: openai/text-embedding-3-small
+    type: embedding
+    targets:
+      - { provider: openai, model: text-embedding-3-small, priority: 1 }
+      - { provider: openrouter, model: openai/text-embedding-3-small, priority: 2 }
+
+  - name: cohere/rerank-v3.5
+    type: rerank
+    targets:
+      - { provider: cohere, model: rerank-v3.5 }
+
+  - name: local/llama
+    targets:
+      - { provider: local-vllm, model: meta-llama/Llama-3.1-8B-Instruct }
+
+api_keys:
+  - name: admin
+    hash: sha256:REPLACE_WITH_64_HEX_CHARS_FROM_simple-router_apikey_000000000000000
+    models: ["*"]
+    admin: true              # may call GET /admin/health
+  - name: rag-service
+    hash: sha256:REPLACE_WITH_64_HEX_CHARS_FROM_simple-router_apikey_000000000000000
+    models: ["openai/text-embedding-*", "cohere/*"]   # glob patterns
