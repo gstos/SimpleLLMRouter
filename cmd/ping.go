@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/gstos/SimpleLLMRouter/internal/config"
 )
 
 var (
@@ -29,7 +32,13 @@ var pingCmd = &cobra.Command{
 			}
 			url = base + "/healthz"
 		}
-		client := &http.Client{Timeout: pingTimeout}
+		// Liveness only, no secrets sent: on loopback, don't insist on a verifiable
+		// certificate (the served one may be issued for a public name).
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		if isLocalURL(url) {
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // loopback liveness probe
+		}
+		client := &http.Client{Timeout: pingTimeout, Transport: tr}
 		resp, err := client.Get(url)
 		if err != nil {
 			return err
@@ -47,11 +56,21 @@ var pingCmd = &cobra.Command{
 // localBaseURL is the router's own address from server.listen, via loopback.
 // It reads only the YAML (no master key needed).
 func localBaseURL() (string, error) {
+	base, _, err := localEndpoint()
+	return base, err
+}
+
+// localEndpoint is localBaseURL plus the loaded config (for TLS settings).
+func localEndpoint() (string, *config.Config, error) {
 	cfg, err := loadConfig()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return "http://" + loopback(cfg.Server.Listen), nil
+	scheme := "http"
+	if cfg.Server.TLS.Enabled() {
+		scheme = "https"
+	}
+	return scheme + "://" + loopback(cfg.Server.Listen), cfg, nil
 }
 
 // loopback turns a listen address like ":8080" or "0.0.0.0:8080" into a dialable local one.

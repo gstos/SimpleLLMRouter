@@ -18,6 +18,19 @@ server:
   failure_cooldown: 30s    # a failed target is deprioritised for this long
   health_interval: 60s     # background provider probes; 0 disables
   health_timeout: 10s
+  tls:
+    mode: off                    # off | file | self-signed
+    # file: a certificate written by any tool (lego, certbot, cert-manager...),
+    # re-read live when it changes. Until it exists and is valid, a self-signed
+    # fallback is served (fallback_self_signed: false to fail instead).
+    # cert_file: tls/tls.crt     # relative to this file's directory
+    # key_file: tls/tls.key
+    # self-signed: generated, stored in dir, renewed before expiry. Covers
+    # localhost, 127.0.0.1 and ::1, plus:
+    # domains: [router.lan]
+    # dir: tls                   # where self-signed certificates are stored (default: tls)
+    # http_listen: ":80"         # optional plain-HTTP listener that redirects to HTTPS
+    # min_version: "1.2"         # or "1.3"
 
 providers:
   - name: openai

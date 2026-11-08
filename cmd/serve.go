@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	stdlog "log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +30,7 @@ import (
 	"github.com/gstos/SimpleLLMRouter/internal/router"
 	"github.com/gstos/SimpleLLMRouter/internal/secrets"
 	"github.com/gstos/SimpleLLMRouter/internal/server"
+	"github.com/gstos/SimpleLLMRouter/internal/tlsconf"
 )
 
 var (
@@ -72,9 +76,16 @@ var serveCmd = &cobra.Command{
 			keys.set(ci)
 		}
 
+		var tlsMgr *tlsconf.Manager // set below when TLS is on
 		unsealReq := make(chan unsealRequest)
 		rotateReq := make(chan rotateRequest)
 		srv := server.New(log, server.Options{
+			TLSInfo: func() any {
+				if tlsMgr == nil {
+					return nil
+				}
+				return tlsMgr.Info()
+			},
 			AllowRemoteKeyAdmin: serveRemoteKeyAdmin,
 			Unseal: func(ctx context.Context, key string) error {
 				req := unsealRequest{key: key, done: make(chan error, 1)}
@@ -123,11 +134,37 @@ var serveCmd = &cobra.Command{
 			return err
 		}
 		listen := cfg.Server.Listen
+		tlsCfg := cfg.Server.TLS
 
-		httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
-		errc := make(chan error, 1)
-		go func() { errc <- httpSrv.ListenAndServe() }()
-		log.Info("listening", "version", version, "addr", listen, "sealed", inst == nil, "providers", len(cfg.Providers), "models", len(cfg.Models), "watch", serveWatch)
+		errLog := stdlog.New(serverErrorWriter{log}, "", 0)
+		httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, ErrorLog: errLog}
+		if tlsCfg.Enabled() {
+			if tlsMgr, err = tlsconf.New(tlsCfg, filepath.Dir(v.GetString("config")), log); err != nil {
+				return fmt.Errorf("tls: %w", err)
+			}
+			httpSrv.TLSConfig = tlsMgr.TLSConfig()
+		}
+		errc := make(chan error, 2)
+		go func() {
+			if tlsMgr != nil {
+				errc <- httpSrv.ListenAndServeTLS("", "") // certificate comes from tlsMgr
+			} else {
+				errc <- httpSrv.ListenAndServe()
+			}
+		}()
+		var redirectSrv *http.Server
+		if tlsCfg.HTTPListen != "" {
+			redirectSrv = &http.Server{Addr: tlsCfg.HTTPListen, Handler: httpsRedirect(listen), ReadHeaderTimeout: 10 * time.Second, ErrorLog: errLog}
+			go func() { errc <- redirectSrv.ListenAndServe() }()
+		}
+		scheme := "http"
+		if tlsMgr != nil {
+			scheme = "https"
+			i := tlsMgr.Info()
+			log.Info("TLS enabled", "mode", tlsCfg.Mode, "source", i.Source, "subject", i.Subject,
+				"not_after", i.NotAfter, "fingerprint_sha256", i.FingerprintSHA256, "redirect_from", tlsCfg.HTTPListen)
+		}
+		log.Info("listening", "version", version, "addr", listen, "scheme", scheme, "sealed", inst == nil, "providers", len(cfg.Providers), "models", len(cfg.Models), "watch", serveWatch)
 		if inst == nil {
 			log.Warn("SEALED: no master key provided; POST it to /admin/unseal (e.g. `simple-router unseal`)")
 		}
@@ -149,6 +186,9 @@ var serveCmd = &cobra.Command{
 			inst = next
 			if next.cfg.Server.Listen != listen {
 				log.Warn("server.listen changed; restart to apply", "running", listen, "configured", next.cfg.Server.Listen)
+			}
+			if !reflect.DeepEqual(next.cfg.Server.TLS, tlsCfg) {
+				log.Warn("server.tls changed; restart to apply (certificate files are reloaded live)")
 			}
 			if wasSealed && reason != "unseal" { // API unseals are logged by the server
 				log.Info("unsealed", "reason", reason)
@@ -181,10 +221,31 @@ var serveCmd = &cobra.Command{
 		signal.Notify(hup, syscall.SIGHUP)
 		defer signal.Stop(hup)
 
-		var changed <-chan struct{}
+		var changed, certChanged <-chan struct{}
 		if serveWatch {
 			if changed, err = watchFiles(ctx, watchedFiles(), log); err != nil {
 				log.Warn("file watching unavailable; reload with SIGHUP", "err", err)
+			}
+			if files := tlsWatchFiles(tlsMgr); len(files) > 0 {
+				if certChanged, err = watchFiles(ctx, files, log); err != nil {
+					log.Warn("certificate file watching unavailable; checked every minute instead", "err", err)
+				}
+			}
+		}
+		// Periodic certificate check: covers missed file events, directories that
+		// don't exist yet (first issuance), self-signed renewal and expiry warnings.
+		var tlsTick <-chan time.Time
+		if tlsMgr != nil {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			tlsTick = t.C
+		}
+		reloadCert := func(reason string) {
+			if tlsMgr == nil {
+				return
+			}
+			if _, err := tlsMgr.Reload(); err != nil {
+				log.Warn("TLS certificate reload failed; keeping the current one", "reason", reason, "err", err)
 			}
 		}
 
@@ -195,6 +256,11 @@ var serveCmd = &cobra.Command{
 				return err
 			case <-hup:
 				reload("SIGHUP")
+				reloadCert("SIGHUP")
+			case <-certChanged:
+				reloadCert("certificate file change")
+			case <-tlsTick:
+				tlsMgr.Check()
 			case <-changed:
 				reload("file change")
 			case req := <-unsealReq:
@@ -207,6 +273,9 @@ var serveCmd = &cobra.Command{
 				stopInst()
 				shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
+				if redirectSrv != nil {
+					_ = redirectSrv.Shutdown(shutCtx)
+				}
 				if err := httpSrv.Shutdown(shutCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					return err
 				}
@@ -285,6 +354,44 @@ type rotateRequest struct {
 type rotateResult struct {
 	key string
 	err error
+}
+
+// serverErrorWriter sends net/http's internal error log to the JSON log. TLS
+// handshake failures (untrusting clients, scanners) are routine: debug level.
+type serverErrorWriter struct{ log *slog.Logger }
+
+func (w serverErrorWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	if strings.Contains(msg, "TLS handshake error") {
+		w.log.Debug("http server", "err", msg)
+	} else {
+		w.log.Warn("http server", "err", msg)
+	}
+	return len(p), nil
+}
+
+func tlsWatchFiles(m *tlsconf.Manager) []string {
+	if m == nil {
+		return nil
+	}
+	return m.WatchFiles()
+}
+
+// httpsRedirect sends plain-HTTP requests to the same host on the TLS port.
+func httpsRedirect(tlsListen string) http.Handler {
+	_, port, _ := net.SplitHostPort(tlsListen)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if port != "" && port != "443" {
+			host = net.JoinHostPort(host, port)
+		} else if strings.Contains(host, ":") {
+			host = "[" + host + "]" // bare IPv6 literal
+		}
+		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusPermanentRedirect)
+	})
 }
 
 type unsealRequest struct {

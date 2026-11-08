@@ -40,6 +40,8 @@ type Options struct {
 	// checking currentKey, and returns the new key. Errors wrapping
 	// ErrKeyRejected mean currentKey was wrong. Nil disables the endpoint.
 	Rotate func(ctx context.Context, currentKey, newKey string) (string, error)
+	// TLSInfo, when set, describes the served certificate in /admin/health.
+	TLSInfo func() any
 	// AllowRemoteKeyAdmin accepts /admin/unseal and /admin/rotate-master-key from
 	// non-loopback clients. Keys travel in the request body: only behind TLS.
 	AllowRemoteKeyAdmin bool
@@ -457,7 +459,13 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusServiceUnavailable
 		}
 	}
-	writeJSON(w, status, map[string]any{"providers": results})
+	out := map[string]any{"providers": results}
+	if s.opts.TLSInfo != nil {
+		if info := s.opts.TLSInfo(); info != nil {
+			out["tls"] = info
+		}
+	}
+	writeJSON(w, status, out)
 }
 
 // capturedResponse holds a failed upstream response so it can be returned if

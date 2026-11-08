@@ -344,6 +344,7 @@ func init() {
 	rotateMasterCmd.Flags().BoolVar(&rotateViaAPI, "api", false, "ask a running router to rotate (POST /admin/rotate-master-key)")
 	rotateMasterCmd.Flags().StringVar(&rotateAPIURL, "url", "", "with --api: router base URL (default: from server.listen)")
 	rotateMasterCmd.Flags().StringVar(&rotateAPIKey, "api-key", "", "with --api: admin client API key (prefer SIMPLE_ROUTER_API_KEY or the prompt)")
+	addClientTLSFlags(rotateMasterCmd)
 	rotateProviderCmd.Flags().StringVar(&rotateProviderKey, "api-key", "", "new provider API key (prompted or read from stdin if omitted)")
 	rotateCmd.AddCommand(rotateMasterCmd, rotateKeyCmd, rotateProviderCmd)
 }

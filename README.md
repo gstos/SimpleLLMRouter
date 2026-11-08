@@ -12,6 +12,8 @@ An OpenRouter-compatible LLM router in Go.
 - **Encrypted provider credentials** (AES-256-GCM) under a master key; the router starts
   **sealed** and waits for the key if none is provided.
 - **Client API keys** with access to all models or to glob patterns, stored only as hashes.
+- **HTTPS** with your own certificates (renewed by any tool, swapped in live) or a generated
+  self-signed one.
 - **Hot reload** of the config, live key rotation, and a CLI to manage it all.
 
 ## Install
@@ -79,6 +81,8 @@ server:
   failure_cooldown: 30s            # a failed target is moved to the back for this long
   health_interval: 60s             # background provider probes; 0 disables
   health_timeout: 10s
+  tls:                             # see "HTTPS"
+    mode: off                      # off | file | self-signed
 
 providers:                         # OpenAI-compatible upstreams
   - name: openai
@@ -119,10 +123,10 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
 | `key add <name> [--models a,b*] [--admin]` | Generates a client key, stores only its hash, prints the key once. Default access: all models. |
 | `key list` / `key remove <name>` | Names and access only; keys can't be recovered. |
-| `rotate master-key [--out FILE] [--api]` | New master key; every provider credential is re-encrypted. See [Rotation](#rotation). |
+| `rotate master-key [--out FILE] [--api [--ca-file F] [--insecure]]` | New master key; every provider credential is re-encrypted. See [Rotation](#rotation). |
 | `rotate key <name>` | New client key with the same access; the old one stops working. |
 | `rotate provider <name> [--api-key K]` | Replaces an upstream credential (prompted or piped like `provider add`). |
-| `unseal [--url URL]` | Sends the master key to a running, sealed router. |
+| `unseal [--url URL] [--ca-file F] [--insecure]` | Sends the master key to a running, sealed router. |
 | `health [--json]` | Probes every provider; exits non-zero if any is down. |
 | `validate` | Checks the config; with a master key, also that every secret decrypts. |
 | `ping [--url URL]` | Checks a running router's `/healthz` (used by the container health check). |
@@ -149,7 +153,7 @@ or `X-Api-Key`. Errors use OpenRouter's shape: `{"error": {"code": 404, "message
 | POST | `/embeddings` | embedding models |
 | POST | `/rerank` | rerank models (Cohere/Jina style `{model, query, documents}`) |
 | GET | `/models` | the models this key can use |
-| GET | `/admin/health[?refresh=1]` | provider health; admin keys; 503 if any provider is down |
+| GET | `/admin/health[?refresh=1]` | provider health and the served TLS certificate; admin keys; 503 if any provider is down |
 | POST | `/admin/unseal` | `{"master_key"}`; admin key, localhost only |
 | POST | `/admin/rotate-master-key` | `{"master_key", "new_master_key"?}` returns the new key; admin key, localhost only |
 | GET | `/healthz` | liveness, no auth: `ok`, or `sealed` (still 200) |
@@ -237,8 +241,51 @@ regular rotation.
 
 A config that fails to parse, validate or decrypt is logged and ignored, and the running one keeps
 serving. Requests in progress finish on the config they started with; sticky sessions, cooldowns
-and health state carry over. Without a key file, reloads use the in-memory key. Only a
-`server.listen` change needs a restart.
+and health state carry over. Without a key file, reloads use the in-memory key. Only changes to
+`server.listen` and `server.tls` settings need a restart; certificate files rotate live (see
+[HTTPS](#https)).
+
+## HTTPS
+
+Set `server.tls.mode` (a restart is needed to change the mode; certificates themselves rotate live):
+
+| Mode | Certificate |
+|---|---|
+| `off` (default) | plain HTTP |
+| `file` | `cert_file` + `key_file` (PEM, chain allowed), written by any tool: lego, certbot, acme.sh, cert-manager, a script |
+| `self-signed` | generated on first start, stored in `dir` (default `tls/` next to the config), renewed 30 days before expiry. Covers `localhost`, `127.0.0.1`, `::1` and `domains` |
+
+```yaml
+server:
+  listen: ":8443"
+  tls:
+    mode: file
+    cert_file: certs/router.crt
+    key_file: certs/router.key
+    http_listen: ":80"          # optional: redirect plain HTTP to HTTPS
+```
+
+**Live rotation.** Every new connection gets the current certificate, so it's replaced without a
+restart and without dropping open connections. In `file` mode the router watches the certificate
+files (and checks them every minute, which also covers directories that don't exist yet). A new pair
+is used only if it parses, the key matches the certificate, and it isn't expired. A half-written or
+broken pair is logged and the current certificate keeps serving, so tools that write the key and
+the certificate in two steps are fine. No deploy hook or signal is needed; `SIGHUP` also reloads.
+A warning is logged when the certificate is within 14 days of expiry.
+
+**Before the first certificate exists** (e.g. while an ACME client issues it), `file` mode serves the
+self-signed certificate instead and switches over as soon as a valid pair appears. A sealed router
+can therefore be unsealed over HTTPS from the start. Set `fallback_self_signed: false` to refuse to
+start without the files.
+
+**Clients.** For a self-signed router, trust `tls/selfsigned.crt`, e.g.
+`curl --cacert tls/selfsigned.crt https://localhost:8443/healthz`; the router logs its SHA-256
+fingerprint. `unseal` and `rotate master-key --api` verify the certificate since they send the master
+key: they trust the system CAs, the router's self-signed certificate (found from the config) and
+`--ca-file`. For a local router in `file` mode, they check the certificate against the name it was
+issued for. `--insecure` skips verification and is accepted only for localhost URLs. `ping` uses
+HTTPS automatically. `/admin/health` shows the served certificate: source, names, expiry and
+fingerprint.
 
 ## Docker
 
@@ -265,7 +312,10 @@ docker run -d -p 8080:8080 \
   sealed. Rotating over the API needs that setup or a writable key file, since the router can't
   replace a read-only secret.
 - The `HEALTHCHECK` runs `simple-router ping`, which calls `/healthz` over loopback on the port from
-  `server.listen`. It needs no master key.
+  `server.listen`, over HTTPS when TLS is on. It needs no master key.
+- For HTTPS, publish the TLS port (e.g. `-p 8443:8443` with `listen: ":8443"`) and keep
+  certificates in the config volume, e.g. `cert_file: certs/router.crt`, so a tool writing into
+  `conf/certs/` on the host (or a sidecar sharing the volume) rotates them live.
 
 Build locally with `docker build -t simple-router .` (pass `--build-arg VERSION=...` to stamp a version).
 

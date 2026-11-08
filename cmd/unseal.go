@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/secrets"
 )
 
@@ -63,14 +64,21 @@ func keyAdminCall(cmd *cobra.Command, path, baseURL, apiKey string, payload map[
 	}
 
 	url := strings.TrimRight(baseURL, "/")
+	var cfg *config.Config
 	if url == "" {
-		base, err := localBaseURL()
+		base, c, err := localEndpoint()
 		if err != nil {
 			return nil, fmt.Errorf("%w (or pass --url)", err)
 		}
-		url = base
+		url, cfg = base, c
+	} else if c, err := loadConfig(); err == nil {
+		cfg = c // used to trust the router's self-signed certificate, if any
 	}
 	url = strings.TrimSuffix(url, path) + path
+	tlsConf, err := clientTLS(url, cfg)
+	if err != nil {
+		return nil, err
+	}
 	if strings.HasPrefix(url, "http://") && !isLocalURL(url) {
 		fmt.Fprintln(os.Stderr, "warning: sending the master key over plain HTTP to a non-local address")
 	}
@@ -95,7 +103,12 @@ func keyAdminCall(cmd *cobra.Command, path, baseURL, apiKey string, payload map[
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = tlsConf
+	resp, err := (&http.Client{Timeout: 60 * time.Second, Transport: tr}).Do(req)
+	if err != nil && strings.Contains(err.Error(), "certificate") {
+		return nil, fmt.Errorf("%w\n(trust the router's CA with --ca-file; for a local router, --insecure skips verification)", err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -124,4 +137,5 @@ func isLocalURL(u string) bool {
 func init() {
 	unsealCmd.Flags().StringVar(&unsealURL, "url", "", "router base URL (default: from server.listen in the config)")
 	unsealCmd.Flags().StringVar(&unsealAPIKey, "api-key", "", "admin client API key (prefer SIMPLE_ROUTER_API_KEY or the prompt)")
+	addClientTLSFlags(unsealCmd)
 }

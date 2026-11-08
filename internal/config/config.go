@@ -37,7 +37,49 @@ type Server struct {
 	FailureCooldown time.Duration `mapstructure:"failure_cooldown"`
 	HealthInterval  time.Duration `mapstructure:"health_interval"`
 	HealthTimeout   time.Duration `mapstructure:"health_timeout"`
+	TLS             TLS           `mapstructure:"tls"`
 }
+
+// TLS modes.
+const (
+	TLSOff        = "off"
+	TLSFile       = "file"
+	TLSSelfSigned = "self-signed"
+)
+
+type TLS struct {
+	// Mode: off (default) | file | self-signed.
+	Mode string `mapstructure:"mode"`
+
+	// file: PEM certificate (with chain) and key, written by any tool (lego,
+	// certbot, cert-manager...). Re-read live when they change; a pair that
+	// doesn't parse, match or is expired is ignored and the current one stays.
+	CertFile string `mapstructure:"cert_file"`
+	KeyFile  string `mapstructure:"key_file"`
+	// file: serve a self-signed certificate until cert_file/key_file exist and
+	// are valid (e.g. during the first ACME issuance). Default true.
+	FallbackSelfSigned *bool `mapstructure:"fallback_self_signed"`
+
+	// self-signed (and the fallback): names besides localhost, 127.0.0.1, ::1.
+	Domains []string `mapstructure:"domains"`
+
+	// Where the self-signed certificate is stored (0700). Default: "tls" next
+	// to the config file.
+	Dir string `mapstructure:"dir"`
+
+	// Optional plain-HTTP listener (e.g. ":80") that redirects to HTTPS.
+	HTTPListen string `mapstructure:"http_listen"`
+
+	// MinVersion: "1.2" (default) or "1.3".
+	MinVersion string `mapstructure:"min_version"`
+}
+
+// Fallback reports whether file mode serves a self-signed certificate while
+// the configured files are missing or invalid.
+func (t TLS) Fallback() bool { return t.FallbackSelfSigned == nil || *t.FallbackSelfSigned }
+
+// Enabled reports whether the router serves HTTPS.
+func (t TLS) Enabled() bool { return t.Mode != TLSOff }
 
 type Provider struct {
 	Name    string `mapstructure:"name"`
@@ -127,6 +169,12 @@ func (c *Config) ApplyDefaults() {
 	if s.HealthTimeout == 0 {
 		s.HealthTimeout = 10 * time.Second
 	}
+	if s.TLS.Mode == "" {
+		s.TLS.Mode = TLSOff
+	}
+	if s.TLS.MinVersion == "" {
+		s.TLS.MinVersion = "1.2"
+	}
 	for i := range c.Providers {
 		p := &c.Providers[i]
 		p.BaseURL = strings.TrimRight(p.BaseURL, "/")
@@ -157,6 +205,24 @@ func (c *Config) ApplyDefaults() {
 func (c *Config) Validate() error {
 	var errs []string
 	add := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
+
+	t := c.Server.TLS
+	switch t.Mode {
+	case TLSOff:
+	case TLSFile:
+		if t.CertFile == "" || t.KeyFile == "" {
+			add("server.tls: mode file needs cert_file and key_file")
+		}
+	case TLSSelfSigned:
+	default:
+		add("server.tls: unknown mode %q (off|file|self-signed)", t.Mode)
+	}
+	if t.HTTPListen != "" && !t.Enabled() {
+		add("server.tls: http_listen needs TLS enabled")
+	}
+	if t.MinVersion != "1.2" && t.MinVersion != "1.3" {
+		add("server.tls: min_version must be \"1.2\" or \"1.3\"")
+	}
 
 	providers := map[string]bool{}
 	for i, p := range c.Providers {
