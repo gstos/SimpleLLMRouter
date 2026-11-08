@@ -37,9 +37,14 @@ type Checker struct {
 func New(providers []config.Provider, timeout time.Duration, onResult func(Result)) *Checker {
 	return &Checker{
 		providers: providers,
-		client:    &http.Client{Timeout: timeout},
-		onResult:  onResult,
-		last:      map[string]Result{},
+		client: &http.Client{
+			Timeout: timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return fmt.Errorf("upstream redirects are not allowed")
+			},
+		},
+		onResult: onResult,
+		last:     map[string]Result{},
 	}
 }
 

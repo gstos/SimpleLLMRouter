@@ -107,7 +107,13 @@ func keyAdminCall(cmd *cobra.Command, path, baseURL, apiKey string, payload map[
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = tlsConf
-	resp, err := (&http.Client{Timeout: 60 * time.Second, Transport: tr}).Do(req)
+	client := &http.Client{
+		Timeout: 60 * time.Second, Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("master key endpoint redirects are not allowed")
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil && strings.Contains(err.Error(), "certificate") {
 		return nil, fmt.Errorf("%w\n(trust the router's CA with --ca-file; for a local router, --insecure skips verification)", err)
 	}
