@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gstos/SimpleLLMRouter/internal/auth"
+	"github.com/gstos/SimpleLLMRouter/internal/configfile"
 	"github.com/gstos/SimpleLLMRouter/internal/secrets"
 )
 
@@ -33,22 +33,22 @@ var encryptCmd = &cobra.Command{
 		"so it doesn't end up in your shell history:\n\n  printf %s \"$OPENAI_API_KEY\" | simple-router encrypt",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ci, err := masterCipher()
+		// Check the key against the config when there is one; plain encryption otherwise.
+		var ci *secrets.Cipher
+		var err error
+		if f, lerr := configfile.Load(v.GetString("config")); lerr == nil {
+			ci, err = verifiedCipher(f)
+		} else {
+			ci, err = interactiveCipher()
+		}
 		if err != nil {
 			return err
 		}
 		var secret string
 		if len(args) == 1 {
 			secret = args[0]
-		} else {
-			sc := bufio.NewScanner(cmd.InOrStdin())
-			sc.Buffer(make([]byte, 64<<10), 1<<20)
-			if sc.Scan() {
-				secret = sc.Text()
-			}
-			if err := sc.Err(); err != nil {
-				return err
-			}
+		} else if secret, err = readSecret(cmd.InOrStdin(), "Secret: "); err != nil {
+			return err
 		}
 		secret = strings.TrimSpace(secret)
 		if secret == "" {

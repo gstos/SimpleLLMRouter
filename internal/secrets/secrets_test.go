@@ -32,3 +32,20 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal("short key accepted")
 	}
 }
+
+func TestKeyCheck(t *testing.T) {
+	k1, _ := GenerateKey()
+	k2, _ := GenerateKey()
+	c1, _ := New(k1)
+	c1b, _ := New(k1)
+	c2, _ := New(k2)
+	if !c1.VerifyKeyCheck(c1b.KeyCheck()) {
+		t.Fatal("same key, different check")
+	}
+	if c2.VerifyKeyCheck(c1.KeyCheck()) {
+		t.Fatal("different key accepted")
+	}
+	if len(c1.KeyCheck()) != len(CheckPrefix)+32 {
+		t.Fatalf("check length: %s", c1.KeyCheck())
+	}
+}

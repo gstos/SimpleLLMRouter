@@ -20,6 +20,8 @@ type File struct {
 	path string
 	doc  *yaml.Node // DocumentNode
 	mode fs.FileMode
+
+	existed bool
 }
 
 // Load reads path. A missing file yields an empty document that Save will create.
@@ -32,6 +34,7 @@ func Load(path string) (*File, error) {
 	case err != nil:
 		return nil, err
 	default:
+		f.existed = true
 		if st, err := os.Stat(path); err == nil {
 			f.mode = st.Mode().Perm()
 		}
@@ -192,4 +195,105 @@ func itemName(item *yaml.Node) string {
 		}
 	}
 	return ""
+}
+
+// Scalar returns a top-level scalar value, or "" if absent.
+func (f *File) Scalar(key string) string {
+	root := f.doc.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key && root.Content[i+1].Kind == yaml.ScalarNode {
+			return root.Content[i+1].Value
+		}
+	}
+	return ""
+}
+
+// SetScalar sets a top-level scalar. A new key is inserted at the top of the
+// file, with comment as its head comment.
+func (f *File) SetScalar(key, value, comment string) {
+	root := f.doc.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			root.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+			return
+		}
+	}
+	k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key, HeadComment: comment}
+	v := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+	// Keep a leading file comment (attached to the first key) at the very top.
+	if len(root.Content) > 0 && root.Content[0].HeadComment != "" {
+		k.HeadComment, root.Content[0].HeadComment = root.Content[0].HeadComment+"\n\n"+comment, ""
+	}
+	root.Content = append([]*yaml.Node{k, v}, root.Content...)
+}
+
+// Field returns a scalar field of the named item in section, or "".
+func (f *File) Field(section, name, field string) string {
+	if n := f.fieldNode(section, name, field); n != nil {
+		return n.Value
+	}
+	return ""
+}
+
+// SetField sets a scalar field of the named item, adding the field if missing.
+// It reports whether the item exists.
+func (f *File) SetField(section, name, field, value string) bool {
+	seq := f.seq(section, false)
+	if seq == nil {
+		return false
+	}
+	for _, item := range seq.Content {
+		if itemName(item) != name {
+			continue
+		}
+		for i := 0; i+1 < len(item.Content); i += 2 {
+			if item.Content[i].Value == field {
+				item.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+				return true
+			}
+		}
+		item.Content = append(item.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: field},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
+		return true
+	}
+	return false
+}
+
+func (f *File) fieldNode(section, name, field string) *yaml.Node {
+	seq := f.seq(section, false)
+	if seq == nil {
+		return nil
+	}
+	for _, item := range seq.Content {
+		if itemName(item) != name {
+			continue
+		}
+		for i := 0; i+1 < len(item.Content); i += 2 {
+			if item.Content[i].Value == field && item.Content[i+1].Kind == yaml.ScalarNode {
+				return item.Content[i+1]
+			}
+		}
+	}
+	return nil
+}
+
+// Exists reports whether the file was present on disk when loaded.
+func (f *File) Exists() bool { return f.existed }
+
+// SetMapping sets a top-level key to a mapping encoded from v, appending it if new.
+func (f *File) SetMapping(key string, v any) error {
+	var n yaml.Node
+	if err := n.Encode(v); err != nil {
+		return err
+	}
+	root := f.doc.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			root.Content[i+1] = &n
+			return nil
+		}
+	}
+	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &n)
+	return nil
 }

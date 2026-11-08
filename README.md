@@ -8,9 +8,8 @@ credentials and per-key model access.
 
 ```sh
 go build -o bin/simple-router .
-bin/simple-router keygen > master.key          # keep this secret
-export SIMPLE_ROUTER_MASTER_KEY_FILE=master.key
-cp config.example.yaml config.yaml             # or start from nothing: the helpers create the file
+bin/simple-router init                         # master.key + config.yaml + admin key (printed once)
+export SIMPLE_ROUTER_MASTER_KEY_FILE=$PWD/master.key
 
 bin/simple-router provider add openai --base-url https://api.openai.com/v1   # prompts for the key (hidden)
 bin/simple-router key add my-app --models 'openai/*'                          # prints the client key once
@@ -21,6 +20,12 @@ bin/simple-router serve
 
 ### Config helpers
 
+Commands that encrypt (`provider add`, `encrypt`) take the master key from the flags/env above, or
+prompt for it (hidden) when none is set and you're at a terminal. Before encrypting anything they verify
+the key: against `master_key_check` (an HMAC fingerprint of the key, written on the first `provider add`)
+and by test-decrypting the existing `enc:v1:` values. `serve` and `validate` also reject a key that
+doesn't match `master_key_check`. `key add` needs no master key: client keys are hashed, not encrypted.
+
 They edit the YAML in place (comments are kept; alignment of inline comments may be normalised).
 Restart the server after changes.
 
@@ -30,6 +35,10 @@ Restart the server after changes.
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
 | `key add <name> [--models a,b*] [--admin]` | Generates a client key, stores only its hash, prints the key once. Default access: all models. |
 | `key list` / `key remove <name>` | Names and access only; keys can't be recovered. |
+| `init [--listen ADDR]` | First use: creates the master key file (0600), a starter config with `master_key_check`, and an `admin` client key (printed once). Never overwrites. |
+| `rotate master-key [--out FILE]` | Verifies the current key, re-encrypts every provider credential under a new one, updates `master_key_check`. Replaces the current key file safely (`<file>.new` → config → rename); pass `--out` if the key came from an env var. |
+| `rotate key <name>` | New client key with the same access; the old one stops working on restart. |
+| `rotate provider <name> [--api-key K]` | Replaces an upstream credential (prompted/piped like `provider add`). |
 | `encrypt`, `apikey` | Lower-level: print an encrypted value / a key+hash without touching the config. |
 
 The master key can also come from `SIMPLE_ROUTER_MASTER_KEY` or `SIMPLE_ROUTER_MASTER_KEY_FILE`.
@@ -68,7 +77,8 @@ Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
 ## CLI
 
 `serve`, `health` (probe all providers; exits non-zero if any is down, `--json`), `validate`,
-`ping`, `keygen`, `encrypt`, `apikey`, `provider add|list|remove`, `key add|list|remove`.
+`ping`, `init`, `rotate master-key|key|provider`, `keygen`, `encrypt`, `apikey`,
+`provider add|list|remove`, `key add|list|remove`.
 
 ## Docker
 

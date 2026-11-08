@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -19,10 +20,13 @@ const (
 )
 
 type Config struct {
-	Server    Server     `mapstructure:"server"`
-	Providers []Provider `mapstructure:"providers"`
-	Models    []Model    `mapstructure:"models"`
-	APIKeys   []APIKey   `mapstructure:"api_keys"`
+	// MasterKeyCheck identifies the master key (see secrets.Cipher.KeyCheck).
+	// Written by `provider add`; when set, a different master key is rejected.
+	MasterKeyCheck string     `mapstructure:"master_key_check"`
+	Server         Server     `mapstructure:"server"`
+	Providers      []Provider `mapstructure:"providers"`
+	Models         []Model    `mapstructure:"models"`
+	APIKeys        []APIKey   `mapstructure:"api_keys"`
 }
 
 type Server struct {
@@ -212,6 +216,9 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	if c.MasterKeyCheck != "" && (!strings.HasPrefix(c.MasterKeyCheck, secrets.CheckPrefix) || len(c.MasterKeyCheck) != len(secrets.CheckPrefix)+32) {
+		add("master_key_check: malformed (expected %s<32 hex chars>)", secrets.CheckPrefix)
+	}
 	if len(c.APIKeys) == 0 {
 		add("api_keys: at least one key is required")
 	}
@@ -222,8 +229,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ErrWrongMasterKey means the master key doesn't match master_key_check.
+var ErrWrongMasterKey = errors.New("wrong master key: it does not match master_key_check in the config")
+
 // DecryptSecrets replaces every provider api_key with its plaintext.
 func (c *Config) DecryptSecrets(ci *secrets.Cipher) error {
+	if c.MasterKeyCheck != "" && !ci.VerifyKeyCheck(c.MasterKeyCheck) {
+		return ErrWrongMasterKey
+	}
 	for i := range c.Providers {
 		p := &c.Providers[i]
 		if p.APIKey == "" {

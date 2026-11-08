@@ -14,7 +14,9 @@ import (
 	"golang.org/x/term"
 
 	"github.com/gstos/SimpleLLMRouter/internal/auth"
+	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/configfile"
+	"github.com/gstos/SimpleLLMRouter/internal/secrets"
 )
 
 // ---- client API keys ----
@@ -152,9 +154,13 @@ var providerAddCmd = &cobra.Command{
 			AuthScheme: provAuthScheme,
 		}
 		if !provNoAuth {
-			ci, err := masterCipher() // check the master key before prompting
+			// Verify the master key before asking for the provider key.
+			ci, err := verifiedCipher(f)
 			if err != nil {
 				return err
+			}
+			if f.Scalar("master_key_check") == "" {
+				f.SetScalar("master_key_check", ci.KeyCheck(), keyCheckComment)
 			}
 			secret := provAPIKey
 			if secret == "" {
@@ -264,9 +270,50 @@ func hasName(entries []configfile.Entry, name string) bool {
 	return false
 }
 
+// verifiedCipher returns the master key cipher after checking it against the
+// config: master_key_check if present, and every existing encrypted value.
+func verifiedCipher(f *configfile.File) (*secrets.Cipher, error) {
+	ci, err := interactiveCipher()
+	if err != nil {
+		return nil, err
+	}
+	if check := f.Scalar("master_key_check"); check != "" && !ci.VerifyKeyCheck(check) {
+		return nil, config.ErrWrongMasterKey
+	}
+	provs, err := f.List("providers")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range provs {
+		if v, _ := p["api_key"].(string); secrets.IsEncrypted(v) {
+			// Only authentication failures prove a wrong key; malformed placeholders are skipped.
+			if _, err := ci.Decrypt(v); errors.Is(err, secrets.ErrDecrypt) {
+				return nil, fmt.Errorf("wrong master key: it cannot decrypt the api_key of provider %q", p["name"])
+			}
+		}
+	}
+	return ci, nil
+}
+
+// interactiveCipher is masterCipher, but prompts for the master key (hidden)
+// when none is configured and stdin is a terminal.
+func interactiveCipher() (*secrets.Cipher, error) {
+	ci, err := masterCipher()
+	if !errors.Is(err, errNoMasterKey) || !stdinIsTerminal() {
+		return ci, err
+	}
+	key, err := readSecret(os.Stdin, "Master key: ")
+	if err != nil {
+		return nil, err
+	}
+	return secrets.New(key)
+}
+
+func stdinIsTerminal() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+
 // readSecret prompts with hidden input on a terminal, or reads one line from piped stdin.
 func readSecret(in io.Reader, prompt string) (string, error) {
-	if fd := int(os.Stdin.Fd()); in == os.Stdin && term.IsTerminal(fd) {
+	if fd := int(os.Stdin.Fd()); in == os.Stdin && stdinIsTerminal() {
 		fmt.Fprint(os.Stderr, prompt)
 		b, err := term.ReadPassword(fd)
 		fmt.Fprintln(os.Stderr)

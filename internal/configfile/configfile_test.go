@@ -81,3 +81,29 @@ func TestNewFile(t *testing.T) {
 		t.Errorf("new file mode %v, want 0600", st.Mode().Perm())
 	}
 }
+
+func TestFieldsAndScalars(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	_ = os.WriteFile(p, []byte(sample), 0o600)
+	f, _ := Load(p)
+	if !f.Exists() {
+		t.Fatal("Exists() false for existing file")
+	}
+	if f.Field("providers", "a", "base_url") != "http://a" {
+		t.Fatal("Field")
+	}
+	if !f.SetField("providers", "a", "api_key", "enc:v1:new") || f.SetField("providers", "zz", "api_key", "x") {
+		t.Fatal("SetField")
+	}
+	f.SetScalar("master_key_check", "kcv:v1:abc", "comment")
+	_ = f.Save()
+
+	f, _ = Load(p)
+	if f.Field("providers", "a", "api_key") != "enc:v1:new" || f.Scalar("master_key_check") != "kcv:v1:abc" {
+		t.Fatal("values not persisted")
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.HasPrefix(string(b), "# top comment") {
+		t.Fatalf("file header moved:\n%s", b)
+	}
+}
