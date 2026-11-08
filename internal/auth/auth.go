@@ -16,9 +16,21 @@ const KeyPrefix = "sr-"
 
 // Key is an authenticated client.
 type Key struct {
-	Name   string
-	Admin  bool
-	models []string // nil => all models
+	Name      string
+	Admin     bool
+	models    []string // nil => all models
+	providers []string // /provider/<name>/ access; nil => none
+}
+
+// AllowsProvider reports whether the key may reach provider directly at
+// /provider/<name>/ (auth: managed providers). Default: none.
+func (k *Key) AllowsProvider(name string) bool {
+	for _, pat := range k.providers {
+		if ok, _ := path.Match(pat, name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Allows reports whether the key may use model.
@@ -46,7 +58,7 @@ func NewStore(keys []config.APIKey) *Store {
 		if err != nil || len(raw) != 32 {
 			continue // rejected by config validation
 		}
-		key := &Key{Name: k.Name, Admin: k.Admin}
+		key := &Key{Name: k.Name, Admin: k.Admin, providers: k.Providers}
 		for _, m := range k.Models {
 			if m == "*" {
 				key.models = nil

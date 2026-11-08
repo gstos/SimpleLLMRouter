@@ -19,7 +19,7 @@ func TestPassthroughRejectsKnownOversizedBodies(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, seen, s := passServer(t, nil)
 			s.cur.Load().cfg.Server.MaxBodyBytes = 16
-			w := passDo(h, "POST", "/pass/"+tc.provider+"/messages", strings.Repeat("x", 17), "X-Opencode-Session", tc.session)
+			w := passDo(h, "POST", "/provider/"+tc.provider+"/messages", strings.Repeat("x", 17), "X-Opencode-Session", tc.session)
 			if w.Code != http.StatusRequestEntityTooLarge {
 				t.Fatalf("status = %d, want 413: %s", w.Code, w.Body.String())
 			}
@@ -48,7 +48,7 @@ func TestPassthroughLimitsUnknownLengthWithClientSession(t *testing.T) {
 	s.cur.Load().cfg.Server.MaxBodyBytes = 16
 	probe := &limitProbeTransport{}
 	s.client.Transport = probe
-	r := httptest.NewRequest("POST", "/pass/oc/messages", strings.NewReader(strings.Repeat("x", 17)))
+	r := httptest.NewRequest("POST", "/provider/oc/messages", strings.NewReader(strings.Repeat("x", 17)))
 	r.ContentLength = -1
 	r.Header.Set("X-Opencode-Session", "client-chosen")
 	w := httptest.NewRecorder()

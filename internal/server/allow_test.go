@@ -34,7 +34,7 @@ func TestAllowCIDRsAndReload(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w.Code, w.Body.String()
 	}
-	for _, p := range []string{"/healthz", "/v1/models", "/pass/x/y", "/admin/health"} {
+	for _, p := range []string{"/healthz", "/v1/models", "/provider/x/y", "/admin/health"} {
 		code, body := get("8.8.8.8:1", p, "")
 		if code != 403 || !strings.Contains(body, `"code":403`) {
 			t.Errorf("%s from outside: %d %s", p, code, body)

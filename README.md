@@ -13,8 +13,8 @@ An OpenRouter-compatible LLM router in Go.
 - **Health checks**: background probes, a CLI check and an admin endpoint.
 - **Encrypted provider credentials** (AES-256-GCM) under a master key; the router starts
   **sealed** and waits for the key if none is provided.
-- **Passthrough** (`/pass/<provider>/...`): a plain proxy to one provider with the client's own
-  credentials, for any API format.
+- **Direct provider access** (`/provider/<name>/...`): any path and API format on one provider,
+  either with router keys (the router holds the provider's key) or with the client's own credentials.
 - **Per-conversation session header** for providers that require one (e.g. OpenCode Go).
 - **Client API keys** with access to all models or to glob patterns, stored only as hashes.
 - **HTTPS** with automatic certificates from Let's Encrypt or any ACME CA (via
@@ -101,7 +101,8 @@ providers:                         # OpenAI-compatible upstreams
     # headers: {X-Title: my-app}   # extra headers on every request
     # paths: {rerank: /v2/rerank, health: /models}   # per-endpoint path overrides
     # session_header: X-Opencode-Session            # send a per-conversation id (see below)
-    # passthrough: true            # also expose it at /pass/openai/... (see "Passthrough")
+    # auth: managed                # or passthrough: client credentials forwarded (see "Direct provider access")
+    # allow_paths: ["/v1/*"]       # limit /provider/openai/... to these paths
 
 models:
   - name: openai/gpt-4o            # the id clients send
@@ -117,6 +118,7 @@ api_keys:                          # client keys; only hashes are stored
     hash: sha256:...
     models: ["*"]                  # glob patterns; ["*"] or empty = all models
     admin: true                    # may call /admin endpoints
+    providers: ["*"]               # may use /provider/<name>/ for these (default: none)
 ```
 
 **Session header.** Some providers want an id tying requests to a conversation. OpenCode Go
@@ -150,9 +152,9 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 |---|---|
 | `serve [--watch=false] [--master-key-stdin] [--allow-remote-key-admin] [--lego PATH]` | Run the router. `--lego` (env `SIMPLE_ROUTER_LEGO`) picks the lego binary for TLS mode `acme`. |
 | `init [--listen ADDR]` | First use: creates the master key file (0600), a starter config with `master_key_check`, and an `admin` client key (printed once). Never overwrites. |
-| `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S] [--session-header H] [--passthrough]` | Encrypts the provider key with the master key and adds the provider. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
+| `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S] [--session-header H] [--auth managed\|passthrough]` | Encrypts the provider key with the master key and adds the provider. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
-| `key add <name> [--models a,b*] [--admin]` | Generates a client key, stores only its hash, prints the key once. Default access: all models. |
+| `key add <name> [--models a,b*] [--admin] [--providers p,q*]` | Generates a client key, stores only its hash, prints the key once. Default access: all models, no `/provider/` access. |
 | `key list` / `key remove <name>` | Names and access only; keys can't be recovered. |
 | `rotate master-key [--out FILE] [--api [--ca-file F] [--insecure]]` | New master key; every provider credential is re-encrypted. See [Rotation](#rotation). |
 | `rotate key <name>` | New client key with the same access; the old one stops working. |
@@ -192,7 +194,7 @@ or `X-Api-Key`. Errors use OpenRouter's shape: `{"error": {"code": 404, "message
 | POST | `/admin/unseal` | `{"master_key"}`; admin key, localhost only |
 | POST | `/admin/rotate-master-key` | `{"master_key", "new_master_key"?}` returns the new key; admin key, localhost only |
 | GET | `/healthz` | liveness, no auth: `ok`, or `sealed` (still 200) |
-| any | `/pass/<provider>/<path>` | forwarded unchanged to a `passthrough` provider, with the client's own credentials; see [Passthrough](#passthrough) |
+| any | `/provider/<name>/<path>` | forwarded unchanged to one provider, with a router key (`auth: managed`) or the client's own credentials (`auth: passthrough`); see [Direct provider access](#direct-provider-access) |
 
 A model a key can't use gets the same 404 as an unknown model, so keys can't discover which models
 exist. Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
@@ -232,54 +234,76 @@ models:
 - Health probes send `anthropic-version: 2023-06-01`, which Anthropic requires on `/models` and
   other providers ignore; set it in a provider's `headers` to change it.
 
-### Passthrough
+### Direct provider access
 
-For a plain proxy to one provider, mark it `passthrough: true`. `/pass/<provider>/<path>` is then
-forwarded to `<base_url>/<path>`: any method, path and query, request and response streamed
-unchanged, so formats the router doesn't implement (Anthropic `/messages`, OpenAI `/responses`...)
-work too.
+`/provider/<name>/<path>` forwards a request to one provider's `<base_url>/<path>`: any method,
+path and query, request and response streamed unchanged, with no model routing or failover. It
+reaches what the model routes don't: Anthropic `/messages` or OpenAI `/responses` on any provider,
+llama-swap's own endpoints (`/running`, `/upstream/<model>/...`), or a non-LLM service on
+`localhost`. A provider's `auth` decides whose credentials are used:
+
+| `auth` | Client sends | Router checks | Provider receives |
+|---|---|---|---|
+| `managed` (default) | a router key (`Authorization: Bearer` or `X-Api-Key`) | the key, and that its `providers` grant this provider | the provider's `api_key` via `auth_header`/`auth_scheme` (nothing if it has none); the router key is removed |
+| `passthrough` | its own provider credentials | nothing | the client's credentials, untouched |
 
 ```yaml
 providers:
-  - name: opencode-go
+  - name: llama-swap               # managed: router keys; no stored key, none sent
+    base_url: http://127.0.0.1:8080
+    allow_paths: ["/v1/*", "/upstream/*", "/running"]   # optional: keep /unload, /logs, the UI out
+  - name: laya                     # managed: clients use router keys, the router holds the service's key
+    base_url: http://127.0.0.1:8000
+    api_key: enc:v1:...
+  - name: opencode-go              # passthrough: each client brings its own OpenCode Go key
     base_url: https://opencode.ai/zen/go/v1
-    passthrough: true
+    auth: passthrough
     session_header: X-Opencode-Session
+
+api_keys:
+  - {name: notes-app, hash: sha256:..., models: [bge-m3], providers: [laya]}
+  - {name: ops,       hash: sha256:..., models: ["*"],   providers: ["*"]}
 ```
 
 ```sh
 simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 \
-  --no-auth --passthrough --session-header X-Opencode-Session
-# clients: base URL http://router:8080/pass/opencode-go, API key = their own OpenCode Go key
+  --auth passthrough --session-header X-Opencode-Session
+simple-router key add notes-app --models bge-m3 --providers laya
+# clients: base URL https://router/provider/laya with their router key,
+#          or https://router/provider/opencode-go with their own OpenCode Go key
 ```
 
-- **The client's credentials go through untouched** (`Authorization`, `X-Api-Key`...). The router
-  doesn't check them and never adds the provider's stored `api_key`, so a passthrough-only
-  provider needs none. It also works while the router is sealed.
-- **Only providers marked `passthrough` are reachable**, never an arbitrary URL, and a path can't
-  climb above `base_url`. No `X-Forwarded-For` is added. Redirects are returned to the client, not
-  followed.
-- **No routing, failover or sticky pinning**: the target is the named provider. A provider can be
-  both a passthrough and a target of `models` (which use its stored key).
+- **Managed providers are closed by default.** A key reaches `/provider/<name>/` only when its
+  `providers` list (glob patterns, `"*"` = all) names it; `models: ["*"]` doesn't grant it. Without a
+  valid key the answer is 401, and a provider the key may not use gets the same 404 as an unknown one,
+  so keys can't discover providers. Managed access returns 503 while the router is sealed.
+- **Passthrough providers are open to anyone who can connect**: the router doesn't authenticate the
+  client, never adds a stored key (so `api_key`, `auth_header` and `auth_scheme` are refused there),
+  and works while sealed. They can't be targets of `models` (whose clients present router keys), and
+  they're left out of health checks, since probing them needs a client's key.
+- **`allow_paths`** (both modes) limits the paths: exact entries, or prefixes ending in `*`. Other
+  paths get 403. `..` is resolved first, so a path can't climb above `base_url` or out of the list.
+- Only configured providers are reachable, never an arbitrary URL. A provider's `headers` are sent;
+  no `X-Forwarded-*` is added. Redirects are returned to the client, not followed. A managed provider
+  can be a model target and reachable at `/provider/` at the same time.
 - **`session_header`** works here too: the id is hashed from the system prompt / `instructions`
   and the messages (or `input`) up to the first user message, so every turn of a chat shares it.
   A client-sent value wins; requests with no conversation get a random one.
-- Each request is logged with provider, method, path, status and duration, never credentials.
-- `server.request_timeout` bounds uploads and upstream responses, including streams. A timeout
+- `server.max_body_bytes` and `server.request_timeout` apply, including to streams. A timeout
   before response headers returns 504 (408 while reading a body for session derivation); after
   streaming starts, the connection is terminated.
-- Passthrough-only providers (no `api_key`) are left out of health checks, since probing them needs
-  the client's key.
+- Each request is logged with provider, auth mode, key name, method, path, status and duration,
+  never credentials.
 
-Since there is no router authentication on `/pass/`, anyone who can reach the router can relay
-through it to these providers (with their own provider key). Restrict who can connect with
+Since `passthrough` providers have no router authentication, anyone who can reach the router can
+relay through it to them (with their own provider key). Restrict who can connect with
 [`server.allow_cidrs`](#client-allowlist), keep it on a trusted network, or put it behind a proxy
 that restricts access.
 
 ## Client allowlist
 
 `server.allow_cidrs` limits which client addresses may use the router at all. It covers every
-route: the API, `/pass/`, `/admin/` and `/healthz`.
+route: the API, `/provider/`, `/admin/` and `/healthz`.
 
 ```yaml
 server:

@@ -18,7 +18,7 @@ server:
   failure_cooldown: 30s    # a failed target is deprioritised for this long
   health_interval: 60s     # background provider probes; 0 disables
   health_timeout: 10s
-  # Client IP allowlist for every route (API, /pass/, /admin/, /healthz). CIDRs or
+  # Client IP allowlist for every route (API, /provider/, /admin/, /healthz). CIDRs or
   # bare IPs; empty or omitted allows everyone. Loopback is always allowed. Applied
   # on reload. Peers not listed are dropped at connect time, before the TLS handshake.
   # allow_cidrs:
@@ -90,10 +90,13 @@ providers:
     base_url: https://opencode.ai/zen/go/v1
     api_key: enc:v1:REPLACE_ME
     session_header: X-Opencode-Session   # required: a per-conversation id is sent in it
-  - name: opencode-go-pass   # passthrough only: /pass/opencode-go-pass/<path> is forwarded
-    base_url: https://opencode.ai/zen/go/v1    # unchanged with the client's own key
-    passthrough: true                          # (not checked by the router: trusted networks)
+  - name: opencode-go-pass   # /provider/opencode-go-pass/<path>, forwarded unchanged with the
+    base_url: https://opencode.ai/zen/go/v1    # client's own key; the router checks nothing
+    auth: passthrough                          # (trusted networks / server.allow_cidrs)
     session_header: X-Opencode-Session
+  - name: llama-swap         # managed (default): /provider/llama-swap/<path> needs a router key
+    base_url: http://127.0.0.1:8080            # whose `providers` grant it; no stored key here
+    allow_paths: ["/v1/*", "/upstream/*", "/running"]   # keep /unload, /logs and the UI out
 
 models:
   - name: openai/gpt-4o      # the id clients send
@@ -129,6 +132,7 @@ api_keys:
     hash: sha256:REPLACE_WITH_64_HEX_CHARS_FROM_simple-router_apikey_000000000000000
     models: ["*"]
     admin: true              # may call GET /admin/health
+    providers: ["*"]         # may use /provider/<name>/ (managed providers; default: none)
   - name: rag-service
     hash: sha256:REPLACE_WITH_64_HEX_CHARS_FROM_simple-router_apikey_000000000000000
     models: ["openai/text-embedding-*", "cohere/*"]   # glob patterns

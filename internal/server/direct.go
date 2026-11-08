@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -17,26 +18,54 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gstos/SimpleLLMRouter/internal/auth"
+	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/health"
 )
 
-// PassPrefix is the passthrough route: /pass/<provider>/<path> is forwarded to
+// ProviderPrefix is the direct route: /provider/<name>/<path> is forwarded to
 // <provider base_url>/<path>.
-const PassPrefix = "/pass/"
+const ProviderPrefix = "/provider/"
 
-// passthrough forwards a request unchanged to a provider marked passthrough:
-// any method and path, streaming both ways. The client's own credentials go
-// through untouched: the router neither checks them nor adds the provider's
-// stored key, so no master key is needed (it works while sealed). There is no
-// routing or failover: the target is the named provider. Only configured
-// providers are reachable, never an arbitrary URL.
-func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
+// direct forwards a request unchanged to one provider: any method and path,
+// streaming both ways, no model routing or failover. Only configured providers
+// are reachable, never an arbitrary URL, and allow_paths can narrow the paths.
+//
+//   - auth: managed: the client needs a router key whose `providers` grant
+//     this provider. The key is stripped and the provider's own api_key (if
+//     any) is sent instead. 503 while sealed.
+//   - auth: passthrough: nothing is checked; the client's own credentials go
+//     through untouched (works while sealed: no stored secret is used).
+func (s *Server) direct(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, PassPrefix), "/")
+	name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, ProviderPrefix), "/")
 	snap := s.cur.Load()
 	p := snap.cfg.Provider(name)
-	if p == nil || !p.Passthrough {
-		writeError(w, http.StatusNotFound, "no passthrough provider "+strconv.Quote(name))
+	keyName := ""
+	if p == nil || p.Auth != config.AuthPassthrough {
+		// Authenticate before saying whether the provider exists, and answer
+		// unknown and not granted alike, so keys can't enumerate providers.
+		var key *auth.Key
+		if snap, key = s.authenticate(w, r); key == nil {
+			return
+		}
+		if p == nil || !key.AllowsProvider(name) {
+			writeError(w, http.StatusNotFound, "provider "+strconv.Quote(name)+" not found")
+			return
+		}
+		if snap.sealed() {
+			writeError(w, http.StatusServiceUnavailable, "router is sealed: waiting for the master key")
+			return
+		}
+		p = snap.cfg.Provider(name) // the decrypted config of this snapshot
+		keyName = key.Name
+	}
+	upstreamPath := path.Clean("/" + rest) // drops any "..": can't climb above base_url
+	if strings.HasSuffix(rest, "/") && upstreamPath != "/" {
+		upstreamPath += "/" // Clean drops it; some backends care
+	}
+	if !p.PathAllowed(upstreamPath) {
+		writeError(w, http.StatusForbidden, "path "+strconv.Quote(upstreamPath)+" is not allowed for provider "+strconv.Quote(name))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), snap.cfg.Server.RequestTimeout)
@@ -94,18 +123,27 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(base)
-			// path.Clean on an absolute path drops any "..": the request can't
-			// climb above base_url.
-			pr.Out.URL.Path = strings.TrimSuffix(base.Path, "/") + path.Clean("/"+rest)
+			pr.Out.URL.Path = strings.TrimSuffix(base.Path, "/") + upstreamPath
 			pr.Out.URL.RawPath = ""
 			pr.Out.Host = base.Host
+			if p.Auth == config.AuthPassthrough {
+				for k, v := range p.Headers {
+					pr.Out.Header.Set(k, v)
+				}
+			} else {
+				// The router key never reaches the provider.
+				pr.Out.Header.Del("Authorization")
+				pr.Out.Header.Del("X-Api-Key")
+				health.SetAuth(pr.Out, p) // static headers + the stored key, if any
+			}
 			if session != "" {
 				pr.Out.Header.Set(p.SessionHeader, session)
 			}
 			// No X-Forwarded-*: the client's address isn't passed on.
 		},
 		Transport:     s.client.Transport,
-		FlushInterval: -1, // stream SSE as it arrives
+		ErrorLog:      slog.NewLogLogger(s.log.Handler(), slog.LevelWarn), // into the JSON log
+		FlushInterval: -1,                                                 // stream SSE as it arrives
 		ModifyResponse: func(resp *http.Response) error {
 			status = resp.StatusCode
 			resp.Header.Set("X-Router-Provider", p.Name)
@@ -118,7 +156,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 				writeError(w, status, "request body too large")
 				return
 			}
-			s.log.Warn("passthrough upstream error", "provider", p.Name, "path", "/"+rest, "err", err)
+			s.log.Warn("provider upstream error", "provider", p.Name, "path", upstreamPath, "err", err)
 			if isRequestTimeout(ctx, err) {
 				status = http.StatusGatewayTimeout
 				w.Header().Set("Connection", "close")
@@ -129,8 +167,8 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	rp.ServeHTTP(w, r)
-	s.log.Info("passthrough", "provider", p.Name, "method", r.Method, "path", "/"+rest,
-		"status", status, "elapsed", time.Since(start).Round(time.Millisecond).String())
+	s.log.Info("provider request", "provider", p.Name, "auth", p.Auth, "key", keyName, "method", r.Method,
+		"path", upstreamPath, "status", status, "elapsed", time.Since(start).Round(time.Millisecond).String())
 }
 
 func isRequestTimeout(ctx context.Context, err error) bool {

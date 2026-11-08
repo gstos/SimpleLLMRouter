@@ -43,8 +43,8 @@ func passServer(t *testing.T, upstream http.HandlerFunc) (http.Handler, func() [
 	}))
 	t.Cleanup(up.Close)
 	cfg := &config.Config{Providers: []config.Provider{
-		{Name: "oc", BaseURL: up.URL + "/zen/go/v1", Passthrough: true, SessionHeader: "X-Opencode-Session"},
-		{Name: "plain", BaseURL: up.URL + "/v1", Passthrough: true, APIKey: "enc:v1:stored"},
+		{Name: "oc", BaseURL: up.URL + "/zen/go/v1", Auth: config.AuthPassthrough, SessionHeader: "X-Opencode-Session"},
+		{Name: "plain", BaseURL: up.URL + "/v1", Auth: config.AuthPassthrough},
 		{Name: "native", BaseURL: up.URL + "/v1"},
 	}}
 	cfg.ApplyDefaults()
@@ -65,7 +65,7 @@ func passDo(h http.Handler, method, target, body string, hdr ...string) *httptes
 
 func TestPassthroughForwardsUnchanged(t *testing.T) {
 	h, seen := passSetup(t, nil)
-	w := passDo(h, "POST", "/pass/plain/messages?beta=true", `{"model":"m"}`,
+	w := passDo(h, "POST", "/provider/plain/messages?beta=true", `{"model":"m"}`,
 		"Authorization", "Bearer client-own-key", "X-Api-Key", "anthropic-key", "Anthropic-Version", "2023-06-01")
 	if w.Code != 200 || w.Body.String() != `{"ok":true}` || w.Header().Get("X-Router-Provider") != "plain" {
 		t.Fatalf("response %d %q %v", w.Code, w.Body.String(), w.Header())
@@ -78,14 +78,15 @@ func TestPassthroughForwardsUnchanged(t *testing.T) {
 		r.header.Get("Anthropic-Version") != "2023-06-01" {
 		t.Fatalf("client headers not passed: %v", r.header)
 	}
-	if strings.Contains(strings.Join(r.header.Values("Authorization"), ""), "stored") {
-		t.Fatal("stored provider key was used")
-	}
 	if r.header.Get("X-Forwarded-For") != "" || r.header.Get("X-Opencode-Session") != "" {
 		t.Fatalf("unexpected headers: %v", r.header)
 	}
 
-	passDo(h, "GET", "/pass/plain/models", "")
+	passDo(h, "GET", "/provider/plain/models", "")
+	passDo(h, "GET", "/provider/plain/v1/", "")
+	if r := seen()[2]; r.path != "/v1/v1/" {
+		t.Fatalf("trailing slash lost: %s", r.path)
+	}
 	if r := seen()[1]; r.method != "GET" || r.path != "/v1/models" {
 		t.Fatalf("GET forwarded as %+v", r)
 	}
@@ -93,8 +94,9 @@ func TestPassthroughForwardsUnchanged(t *testing.T) {
 
 func TestPassthroughOnlyConfiguredProviders(t *testing.T) {
 	h, seen := passSetup(t, nil)
-	for _, target := range []string{"/pass/native/chat/completions", "/pass/unknown/x", "/pass/", "/pass/http:"} {
-		if w := passDo(h, "POST", target, "{}"); w.Code != 404 {
+	// Without a router key, managed and unknown providers look the same: 401.
+	for _, target := range []string{"/provider/native/chat/completions", "/provider/unknown/x", "/provider/", "/provider/http:"} {
+		if w := passDo(h, "POST", target, "{}"); w.Code != 401 {
 			t.Errorf("%s: %d", target, w.Code)
 		}
 	}
@@ -105,9 +107,9 @@ func TestPassthroughOnlyConfiguredProviders(t *testing.T) {
 
 func TestPassthroughCannotClimbAboveBaseURL(t *testing.T) {
 	_, seen, s := passServer(t, nil)
-	r := httptest.NewRequest("GET", "/pass/plain/models", nil)
-	r.URL.Path = "/pass/plain/a/../../../../admin" // straight to the handler: no mux cleaning
-	s.passthrough(httptest.NewRecorder(), r)
+	r := httptest.NewRequest("GET", "/provider/plain/models", nil)
+	r.URL.Path = "/provider/plain/a/../../../../admin" // straight to the handler: no mux cleaning
+	s.direct(httptest.NewRecorder(), r)
 	if got := seen(); len(got) != 1 || got[0].path != "/v1/admin" {
 		t.Fatalf("forwarded to %+v", got)
 	}
@@ -118,17 +120,17 @@ func TestPassthroughSession(t *testing.T) {
 	session := func(i int) string { return seen()[i].header.Get("X-Opencode-Session") }
 
 	// Anthropic /messages: system field + growing messages.
-	passDo(h, "POST", "/pass/oc/messages", `{"system":"S","messages":[{"role":"user","content":"Hi"}]}`)
-	passDo(h, "POST", "/pass/oc/messages", `{"system":"S","messages":[{"role":"user","content":"Hi"},{"role":"assistant","content":"Yo"},{"role":"user","content":"More"}]}`)
+	passDo(h, "POST", "/provider/oc/messages", `{"system":"S","messages":[{"role":"user","content":"Hi"}]}`)
+	passDo(h, "POST", "/provider/oc/messages", `{"system":"S","messages":[{"role":"user","content":"Hi"},{"role":"assistant","content":"Yo"},{"role":"user","content":"More"}]}`)
 	// Another chat.
-	passDo(h, "POST", "/pass/oc/messages", `{"system":"S","messages":[{"role":"user","content":"Other"}]}`)
+	passDo(h, "POST", "/provider/oc/messages", `{"system":"S","messages":[{"role":"user","content":"Other"}]}`)
 	// OpenAI /responses with instructions + string input.
-	passDo(h, "POST", "/pass/oc/responses", `{"instructions":"I","input":"Q"}`)
-	passDo(h, "POST", "/pass/oc/responses", `{"instructions":"I","input":"Q"}`)
+	passDo(h, "POST", "/provider/oc/responses", `{"instructions":"I","input":"Q"}`)
+	passDo(h, "POST", "/provider/oc/responses", `{"instructions":"I","input":"Q"}`)
 	// No conversation, and the client's own header.
-	passDo(h, "GET", "/pass/oc/models", "")
-	passDo(h, "GET", "/pass/oc/models", "")
-	passDo(h, "POST", "/pass/oc/chat/completions", `{"messages":[{"role":"user","content":"x"}]}`, "X-Opencode-Session", "mine")
+	passDo(h, "GET", "/provider/oc/models", "")
+	passDo(h, "GET", "/provider/oc/models", "")
+	passDo(h, "POST", "/provider/oc/chat/completions", `{"messages":[{"role":"user","content":"x"}]}`, "X-Opencode-Session", "mine")
 
 	if len(session(0)) != 32 || session(0) != session(1) {
 		t.Fatalf("growing chat: %q %q", session(0), session(1))
@@ -161,7 +163,7 @@ func TestPassthroughStreams(t *testing.T) {
 	})
 	srv := httptest.NewServer(h)
 	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/pass/plain/chat/completions", "application/json", strings.NewReader(`{"stream":true}`))
+	resp, err := http.Post(srv.URL+"/provider/plain/chat/completions", "application/json", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,11 +183,11 @@ func TestPassthroughStreams(t *testing.T) {
 
 func TestHealthSkipsPassthroughOnly(t *testing.T) {
 	c := health.New([]config.Provider{
-		{Name: "pass-only", BaseURL: "http://127.0.0.1:1", Passthrough: true},
-		{Name: "both", BaseURL: "http://127.0.0.1:1", Passthrough: true, APIKey: "k"},
+		{Name: "pass-only", BaseURL: "http://127.0.0.1:1", Auth: config.AuthPassthrough},
+		{Name: "managed-no-key", BaseURL: "http://127.0.0.1:1", Auth: config.AuthManaged},
 	}, time.Second, nil)
 	res := c.CheckAll(t.Context())
-	if len(res) != 1 || res[0].Provider != "both" {
+	if len(res) != 1 || res[0].Provider != "managed-no-key" {
 		t.Fatalf("%+v", res)
 	}
 }

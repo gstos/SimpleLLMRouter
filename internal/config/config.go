@@ -229,10 +229,38 @@ type Provider struct {
 	// X-Opencode-Session for OpenCode Go. A value the client sends in that
 	// header is passed through instead.
 	SessionHeader string `mapstructure:"session_header"`
-	// Passthrough exposes the provider at /pass/<name>/<path>: requests are
-	// forwarded unchanged with the client's own credentials (not checked by the
-	// router; the stored api_key is not used there).
-	Passthrough bool `mapstructure:"passthrough"`
+	// Auth says whose credentials reach the provider. "managed" (default): the
+	// client authenticates with a router key and the router sends api_key (if
+	// any) with auth_header/auth_scheme. "passthrough": the router checks
+	// nothing and forwards the client's own credentials; the provider is then
+	// only reachable at /provider/<name>/ (not as a model target).
+	Auth string `mapstructure:"auth"`
+	// AllowPaths limits /provider/<name>/<path> to these paths: exact, or a
+	// prefix ending in "*" (e.g. "/v1/*"). Empty allows every path.
+	AllowPaths []string `mapstructure:"allow_paths"`
+}
+
+// Provider auth modes.
+const (
+	AuthManaged     = "managed"
+	AuthPassthrough = "passthrough"
+)
+
+// PathAllowed reports whether /provider/ may forward to path (cleaned, absolute).
+func (p *Provider) PathAllowed(path string) bool {
+	if len(p.AllowPaths) == 0 {
+		return true
+	}
+	for _, a := range p.AllowPaths {
+		if prefix, ok := strings.CutSuffix(a, "*"); ok {
+			if strings.HasPrefix(path, prefix) {
+				return true
+			}
+		} else if path == a {
+			return true
+		}
+	}
+	return false
 }
 
 // Provider returns the named provider, or nil.
@@ -271,6 +299,9 @@ type APIKey struct {
 	Models []string `mapstructure:"models"`
 	// Admin keys may call /admin endpoints (provider health).
 	Admin bool `mapstructure:"admin"`
+	// Providers the key may reach directly at /provider/<name>/ (auth: managed
+	// providers; glob patterns allowed, "*" = all). Empty means none.
+	Providers []string `mapstructure:"providers"`
 }
 
 // Endpoint names used for path lookup.
@@ -354,6 +385,17 @@ func (c *Config) ApplyDefaults() {
 	for i := range c.Providers {
 		p := &c.Providers[i]
 		p.BaseURL = strings.TrimRight(p.BaseURL, "/")
+		if p.Auth == "" {
+			p.Auth = AuthManaged
+		}
+		if p.Auth == AuthPassthrough {
+			// The client's own credentials go through: nothing to default (and
+			// Validate refuses api_key/auth_header/auth_scheme here).
+			if p.HealthMethod == "" {
+				p.HealthMethod = "GET"
+			}
+			continue
+		}
 		if p.AuthHeader == "" {
 			p.AuthHeader = "Authorization"
 		}
@@ -412,6 +454,7 @@ func (c *Config) Validate() error {
 	}
 
 	providers := map[string]bool{}
+	passthrough := map[string]bool{}
 	for i, p := range c.Providers {
 		switch {
 		case p.Name == "":
@@ -430,6 +473,21 @@ func (c *Config) Validate() error {
 		}
 		if p.SessionHeader != "" && !headerName.MatchString(p.SessionHeader) {
 			add("provider %q: session_header %q is not a valid header name", p.Name, p.SessionHeader)
+		}
+		switch p.Auth {
+		case AuthManaged:
+		case AuthPassthrough:
+			passthrough[p.Name] = true
+			if p.APIKey != "" || p.AuthHeader != "" || p.AuthScheme != "" {
+				add("provider %q: api_key, auth_header and auth_scheme don't apply with auth: passthrough (the client's credentials are forwarded)", p.Name)
+			}
+		default:
+			add("provider %q: unknown auth %q (managed|passthrough)", p.Name, p.Auth)
+		}
+		for _, a := range p.AllowPaths {
+			if !strings.HasPrefix(a, "/") || strings.Contains(strings.TrimSuffix(a, "*"), "*") {
+				add("provider %q: allow_paths entry %q must start with \"/\" (\"*\" only at the end)", p.Name, a)
+			}
 		}
 	}
 
@@ -464,6 +522,8 @@ func (c *Config) Validate() error {
 		for _, t := range m.Targets {
 			if !providers[t.Provider] {
 				add("model %q: unknown provider %q", m.Name, t.Provider)
+			} else if passthrough[t.Provider] {
+				add("model %q: provider %q has auth: passthrough and can only be used at /provider/%s/", m.Name, t.Provider, t.Provider)
 			}
 		}
 	}

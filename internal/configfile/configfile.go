@@ -95,7 +95,7 @@ type Provider struct {
 	AuthScheme string `yaml:"auth_scheme,omitempty"`
 	// SessionHeader: see config.Provider.SessionHeader.
 	SessionHeader string `yaml:"session_header,omitempty"`
-	Passthrough   bool   `yaml:"passthrough,omitempty"`
+	Auth          string `yaml:"auth,omitempty"`
 }
 
 // APIKey is a client key entry.
@@ -104,6 +104,8 @@ type APIKey struct {
 	Hash   string   `yaml:"hash"`
 	Models []string `yaml:"models,flow"`
 	Admin  bool     `yaml:"admin,omitempty"`
+	// Providers: /provider/<name>/ access (see config.APIKey.Providers).
+	Providers []string `yaml:"providers,flow,omitempty"`
 }
 
 // Entry is a list item summary for `list` commands.

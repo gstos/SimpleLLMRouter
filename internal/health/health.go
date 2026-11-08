@@ -37,11 +37,11 @@ type Checker struct {
 
 // New returns a Checker. onResult (optional) is called after every probe.
 func New(providers []config.Provider, timeout time.Duration, onResult func(Result)) *Checker {
-	// A passthrough-only provider (no stored key) can't be probed: the client
-	// brings the credentials.
+	// An auth: passthrough provider can't be probed: the client brings the
+	// credentials.
 	var probed []config.Provider
 	for _, p := range providers {
-		if !p.Passthrough || p.APIKey != "" {
+		if p.Auth != config.AuthPassthrough {
 			probed = append(probed, p)
 		}
 	}

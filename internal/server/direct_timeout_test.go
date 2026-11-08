@@ -20,7 +20,7 @@ func TestPassthroughTimesOutWaitingForUpstream(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(srv.URL + "/pass/plain/models")
+	resp, err := client.Get(srv.URL + "/provider/plain/models")
 	if err != nil {
 		t.Fatalf("passthrough did not enforce its own timeout: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestPassthroughTimesOutReadingSessionBody(t *testing.T) {
 	}
 	// Send only part of the body and leave the connection open. The route must
 	// not wait forever while buffering a conversation for session derivation.
-	_, err = fmt.Fprint(conn, "POST /pass/oc/messages HTTP/1.1\r\nHost: router\r\nContent-Length: 10\r\n\r\nx")
+	_, err = fmt.Fprint(conn, "POST /provider/oc/messages HTTP/1.1\r\nHost: router\r\nContent-Length: 10\r\n\r\nx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestPassthroughTimeoutBoundsStreamingResponse(t *testing.T) {
 	defer srv.Close()
 	client := &http.Client{Timeout: 2 * time.Second}
 	start := time.Now()
-	resp, err := client.Get(srv.URL + "/pass/plain/messages")
+	resp, err := client.Get(srv.URL + "/provider/plain/messages")
 	if err != nil {
 		t.Fatal(err)
 	}

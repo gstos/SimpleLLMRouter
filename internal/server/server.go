@@ -129,7 +129,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST "+prefix+"/messages", anthropicErrors(s.proxy(config.EndpointMessages, messages)))
 		mux.Handle("POST "+prefix+"/messages/count_tokens", anthropicErrors(s.proxy(config.EndpointCountTokens, messages)))
 	}
-	mux.HandleFunc(PassPrefix, s.passthrough)
+	mux.HandleFunc(ProviderPrefix, s.direct)
 	mux.HandleFunc("GET /admin/health", s.adminHealth)
 	mux.HandleFunc("POST /admin/unseal", s.unseal)
 	mux.HandleFunc("POST /admin/rotate-master-key", s.rotate)

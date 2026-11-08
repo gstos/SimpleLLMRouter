@@ -134,3 +134,41 @@ func TestAliasValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderAuthValidation(t *testing.T) {
+	cases := []struct {
+		p    Provider
+		m    []Model
+		want string
+	}{
+		{Provider{Auth: AuthPassthrough}, nil, ""},
+		{Provider{}, []Model{{Name: "x", Targets: []Target{{Provider: "p", Model: "m"}}}}, ""},
+		{Provider{Auth: AuthPassthrough, APIKey: "enc:v1:x"}, nil, "don't apply with auth: passthrough"},
+		{Provider{Auth: AuthPassthrough, AuthHeader: "api-key"}, nil, "don't apply with auth: passthrough"},
+		{Provider{Auth: AuthPassthrough}, []Model{{Name: "x", Targets: []Target{{Provider: "p", Model: "m"}}}}, "can only be used at /provider/p/"},
+		{Provider{Auth: "open"}, nil, "unknown auth"},
+		{Provider{AllowPaths: []string{"v1/*"}}, nil, "allow_paths"},
+		{Provider{AllowPaths: []string{"/v1/*/x"}}, nil, "allow_paths"},
+		{Provider{AllowPaths: []string{"/v1/*", "/health"}}, nil, ""},
+	}
+	for i, c := range cases {
+		cfg := base()
+		c.p.Name, c.p.BaseURL = "p", "https://x.test/v1"
+		cfg.Providers = []Provider{c.p}
+		cfg.Models = c.m
+		cfg.ApplyDefaults()
+		err := cfg.Validate()
+		if c.want == "" && err != nil {
+			t.Errorf("case %d: %v", i, err)
+		}
+		if c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("case %d: %v, want %q", i, err, c.want)
+		}
+	}
+	cfg := base()
+	cfg.Providers = []Provider{{Name: "p", BaseURL: "https://x.test"}}
+	cfg.ApplyDefaults()
+	if p := cfg.Providers[0]; p.Auth != AuthManaged || p.AuthHeader != "Authorization" {
+		t.Fatalf("defaults: %+v", p)
+	}
+}

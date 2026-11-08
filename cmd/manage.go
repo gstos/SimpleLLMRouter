@@ -31,6 +31,7 @@ var keyCmd = &cobra.Command{
 var (
 	keyModels []string
 	keyAdmin  bool
+	keyProvs  []string
 )
 
 var keyAddCmd = &cobra.Command{
@@ -39,7 +40,8 @@ var keyAddCmd = &cobra.Command{
 	Long: "Generate a client API key, store its SHA-256 hash in the config and print the key.\n" +
 		"The key is shown only once; it cannot be recovered from the config.\n\n" +
 		"  simple-router key add rag-service --models 'openai/text-embedding-*,cohere/*'\n" +
-		"  simple-router key add ops --admin",
+		"  simple-router key add ops --admin\n" +
+		"  simple-router key add notes --models bge-m3 --providers laya   # also /provider/laya/...",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		f, err := configfile.Load(v.GetString("config"))
@@ -54,7 +56,7 @@ var keyAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if err := f.AddAPIKey(configfile.APIKey{Name: args[0], Hash: auth.Hash(key), Models: models, Admin: keyAdmin}); err != nil {
+		if err := f.AddAPIKey(configfile.APIKey{Name: args[0], Hash: auth.Hash(key), Models: models, Admin: keyAdmin, Providers: keyProvs}); err != nil {
 			return err
 		}
 		if err := f.Save(); err != nil {
@@ -81,13 +83,17 @@ var keyListCmd = &cobra.Command{
 			return err
 		}
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tADMIN\tMODELS")
+		fmt.Fprintln(tw, "NAME\tADMIN\tMODELS\tPROVIDERS")
 		for _, k := range keys {
 			models := fmt.Sprint(k["models"])
 			if k["models"] == nil {
 				models = "[*]"
 			}
-			fmt.Fprintf(tw, "%v\t%v\t%s\n", k["name"], k["admin"] == true, models)
+			provs := "-"
+			if k["providers"] != nil {
+				provs = fmt.Sprint(k["providers"])
+			}
+			fmt.Fprintf(tw, "%v\t%v\t%s\t%s\n", k["name"], k["admin"] == true, models, provs)
 		}
 		return tw.Flush()
 	},
@@ -116,7 +122,7 @@ var (
 	provAuthHeader string
 	provAuthScheme string
 	provSessionHdr string
-	provPass       bool
+	provAuth       string
 )
 
 var providerAddCmd = &cobra.Command{
@@ -131,7 +137,7 @@ var providerAddCmd = &cobra.Command{
 		"      --auth-header api-key --auth-scheme none\n" +
 		"  simple-router provider add vllm --base-url http://localhost:8000/v1 --no-auth\n" +
 		"  simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 \\\n" +
-		"      --session-header X-Opencode-Session\n\n" +
+		"      --auth passthrough --session-header X-Opencode-Session\n\n" +
 		"Other settings (headers, paths, health_method) can be edited in the YAML afterwards.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -159,7 +165,20 @@ var providerAddCmd = &cobra.Command{
 			AuthHeader:    provAuthHeader,
 			AuthScheme:    provAuthScheme,
 			SessionHeader: provSessionHdr,
-			Passthrough:   provPass,
+			Auth:          provAuth,
+		}
+		if provAuth != "" && provAuth != config.AuthManaged && provAuth != config.AuthPassthrough {
+			return fmt.Errorf("--auth must be %s or %s", config.AuthManaged, config.AuthPassthrough)
+		}
+		if provAuth == config.AuthManaged {
+			p.Auth = "" // the default; keep the YAML short
+		}
+		if provAuth == config.AuthPassthrough {
+			// The client's own credentials are forwarded: no stored key.
+			if provAPIKey != "" || provAuthHeader != "" || provAuthScheme != "" {
+				return errors.New("--api-key, --auth-header and --auth-scheme don't apply with --auth passthrough")
+			}
+			provNoAuth = true
 		}
 		if !provNoAuth {
 			// Verify the master key before asking for the provider key.
@@ -351,6 +370,7 @@ func readSecret(in io.Reader, prompt string) (string, error) {
 func init() {
 	keyAddCmd.Flags().StringSliceVar(&keyModels, "models", nil, "models the key may use, comma separated; globs allowed (default: all)")
 	keyAddCmd.Flags().BoolVar(&keyAdmin, "admin", false, "allow the key to call /admin endpoints")
+	keyAddCmd.Flags().StringSliceVar(&keyProvs, "providers", nil, "providers the key may reach directly at /provider/<name>/, comma separated; globs allowed (default: none)")
 	keyCmd.AddCommand(keyAddCmd, keyListCmd, keyRemoveCmd)
 
 	f := providerAddCmd.Flags()
@@ -359,7 +379,7 @@ func init() {
 	f.BoolVar(&provNoAuth, "no-auth", false, "provider needs no API key")
 	f.StringVar(&provAuthHeader, "auth-header", "", "header carrying the key (default Authorization)")
 	f.StringVar(&provAuthScheme, "auth-scheme", "", "prefix before the key (default Bearer; \"none\" sends the raw key)")
-	f.BoolVar(&provPass, "passthrough", false, "also expose it at /pass/<name>/... (client credentials forwarded unchecked; combine with --no-auth for passthrough only)")
+	f.StringVar(&provAuth, "auth", "", "managed (default: clients use router keys, the router sends this provider's key) or passthrough (clients' own credentials forwarded unchecked, only at /provider/<name>/)")
 	f.StringVar(&provSessionHdr, "session-header", "", "send a per-conversation id in this header (e.g. X-Opencode-Session for OpenCode Go)")
 	_ = providerAddCmd.MarkFlagRequired("base-url")
 	providerCmd.AddCommand(providerAddCmd, providerListCmd, providerRemoveCmd)
