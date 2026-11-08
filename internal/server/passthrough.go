@@ -39,11 +39,6 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no passthrough provider "+strconv.Quote(name))
 		return
 	}
-	base, err := url.Parse(p.BaseURL)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "bad base_url")
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), snap.cfg.Server.RequestTimeout)
 	defer cancel()
 	r = r.WithContext(ctx)
@@ -59,6 +54,11 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 			_ = rc.SetReadDeadline(time.Time{})
 		}
 	}()
+	base, err := url.Parse(p.BaseURL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "bad base_url")
+		return
+	}
 
 	session := ""
 	if h := p.SessionHeader; h != "" {
@@ -107,13 +107,13 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			s.log.Warn("passthrough upstream error", "provider", p.Name, "path", "/"+rest, "err", err)
 			if isRequestTimeout(ctx, err) {
 				status = http.StatusGatewayTimeout
 				w.Header().Set("Connection", "close")
 				writeError(w, status, "upstream request timed out")
 				return
 			}
-			s.log.Warn("passthrough upstream error", "provider", p.Name, "path", "/"+rest, "err", err)
 			writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		},
 	}
