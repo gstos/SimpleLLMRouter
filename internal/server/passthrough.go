@@ -2,11 +2,13 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -42,6 +44,21 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "bad base_url")
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), snap.cfg.Server.RequestTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+	// Context cancellation bounds the upstream operation, but does not unblock
+	// reads from an inbound HTTP body. Bound those reads on the connection too.
+	rc := http.NewResponseController(w)
+	deadline, _ := ctx.Deadline()
+	_ = rc.SetReadDeadline(deadline)
+	defer func() {
+		// Keep an expired deadline in place: net/http may still drain an
+		// unfinished body after the handler returns.
+		if time.Now().Before(deadline) {
+			_ = rc.SetReadDeadline(time.Time{})
+		}
+	}()
 
 	session := ""
 	if h := p.SessionHeader; h != "" {
@@ -53,6 +70,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 				var tooBig *http.MaxBytesError
 				if errors.As(err, &tooBig) {
 					status = http.StatusRequestEntityTooLarge
+				} else if isRequestTimeout(ctx, err) {
+					status = http.StatusRequestTimeout
+					w.Header().Set("Connection", "close")
 				}
 				writeError(w, status, err.Error())
 				return
@@ -87,6 +107,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if isRequestTimeout(ctx, err) {
+				status = http.StatusGatewayTimeout
+				w.Header().Set("Connection", "close")
+				writeError(w, status, "upstream request timed out")
+				return
+			}
 			s.log.Warn("passthrough upstream error", "provider", p.Name, "path", "/"+rest, "err", err)
 			writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		},
@@ -94,6 +120,14 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 	rp.ServeHTTP(w, r)
 	s.log.Info("passthrough", "provider", p.Name, "method", r.Method, "path", "/"+rest,
 		"status", status, "elapsed", time.Since(start).Round(time.Millisecond).String())
+}
+
+func isRequestTimeout(ctx context.Context, err error) bool {
+	var timeout net.Error
+	deadline, hasDeadline := ctx.Deadline()
+	return errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+		(hasDeadline && !time.Now().Before(deadline)) ||
+		(errors.As(err, &timeout) && timeout.Timeout())
 }
 
 // passSession derives the session id for a passthrough request from the
