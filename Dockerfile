@@ -5,12 +5,14 @@
 # so multi-arch builds (linux/amd64, linux/arm64) need no emulation.
 FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 ARG TARGETOS TARGETARCH
+ARG VERSION=dev COMMIT=none
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/simple-router . && \
+    go build -trimpath -o /out/simple-router \
+      -ldflags="-s -w -X github.com/gstos/SimpleLLMRouter/cmd.version=$VERSION -X github.com/gstos/SimpleLLMRouter/cmd.commit=$COMMIT" . && \
     mkdir -p /out/etc/simple-router
 
 # ---- runtime ----

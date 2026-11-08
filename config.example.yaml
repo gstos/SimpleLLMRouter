@@ -1,13 +1,14 @@
-# simple-router example configuration.
+# simple-router example configuration (reference for every setting).
 #
-#   simple-router keygen > master.key            # once; keep it secret
-#   export SIMPLE_ROUTER_MASTER_KEY_FILE=master.key
+# For a fresh setup, generate one instead of copying this file:
+#   simple-router init                           # master.key + config.yaml + admin key
+#   export SIMPLE_ROUTER_MASTER_KEY_FILE=$PWD/master.key
 #   simple-router provider add openai --base-url https://api.openai.com/v1   # prompts for the key
 #   simple-router key add my-app --models 'openai/*'                          # prints the client key
 #   simple-router serve
 #
-# The enc:v1:/sha256: values below are placeholders; replace them with the helpers above.
-# `provider add` also writes master_key_check, which makes every command reject a wrong master key.
+# The enc:v1:/sha256: values below are placeholders; create real ones with the helpers above.
+# master_key_check (written by init / provider add) makes every command reject a wrong master key.
 
 server:
   listen: ":8080"

@@ -102,7 +102,8 @@ var rotateMasterCmd = &cobra.Command{
 		"master_key_check. The current key is verified first.\n\n" +
 		"If the current key came from a file, that file is replaced (the new key is written to\n" +
 		"<file>.new first, then the config, then the rename, so an interruption never loses a key).\n" +
-		"Otherwise pass --out for the new key file. Restart the server with the new key afterwards.\n\n" +
+		"Otherwise pass --out for the new key file. A running router that uses the replaced key\n" +
+		"file switches automatically; otherwise give it the new key with `simple-router unseal`.\n\n" +
 		"With --api, a running router does the rotation itself (POST /admin/rotate-master-key):\n" +
 		"no restart; it replaces its key file if it uses one. The new key is written to --out,\n" +
 		"or printed if --out is not given.",
@@ -141,7 +142,11 @@ var rotateMasterCmd = &cobra.Command{
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Re-encrypted %d provider credential(s); new master key in %s.\n", n, out)
-		fmt.Fprintln(cmd.OutOrStdout(), "Restart the server with the new key. The old key no longer decrypts this config.")
+		if inPlace {
+			fmt.Fprintln(cmd.OutOrStdout(), "A running router using this key file switches automatically. The old key no longer works.")
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Give a running router the new key with `simple-router unseal`. The old key no longer works.")
+		}
 		return nil
 	},
 }
@@ -204,7 +209,7 @@ var rotateKeyCmd = &cobra.Command{
 		if err := f.Save(); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Rotated key %q. The old key stops working when the server restarts.\n", args[0])
+		fmt.Fprintf(os.Stderr, "Rotated key %q. A running router stops accepting the old key on reload (automatic).\n", args[0])
 		fmt.Fprintln(os.Stderr, "New key (shown once, save it now):")
 		fmt.Fprintln(cmd.OutOrStdout(), key)
 		return nil
@@ -250,7 +255,7 @@ var rotateProviderCmd = &cobra.Command{
 		if err := f.Save(); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Updated the API key of provider %q. Restart the server to apply.\n", name)
+		fmt.Fprintf(cmd.OutOrStdout(), "Updated the API key of provider %q. A running router applies it automatically.\n", name)
 		return nil
 	},
 }

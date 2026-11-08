@@ -1,0 +1,52 @@
+# Release binaries: built when a GitHub release is published (.github/workflows/release.yml).
+# Check locally: go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
+version: 2
+
+project_name: simple-router
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: simple-router
+    binary: simple-router
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/gstos/SimpleLLMRouter/cmd.version={{ .Version }}
+      - -X github.com/gstos/SimpleLLMRouter/cmd.commit={{ .ShortCommit }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # e.g. simple-router_1.2.3_darwin_arm64.tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - config.example.yaml
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+release:
+  # The release already exists (it triggered the workflow): keep its title and
+  # notes, just attach the archives and checksums.
+  mode: keep-existing

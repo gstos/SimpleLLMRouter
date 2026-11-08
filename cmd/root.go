@@ -19,6 +19,7 @@ var v = viper.New()
 
 var rootCmd = &cobra.Command{
 	Use:           "simple-router",
+	Version:       version,
 	Short:         "An OpenRouter-compatible LLM router with priorities, failover and sticky routing",
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -47,7 +48,7 @@ func init() {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	v.AutomaticEnv()
 
-	rootCmd.AddCommand(serveCmd, keygenCmd, encryptCmd, apikeyCmd, healthCmd, validateCmd, pingCmd, keyCmd, providerCmd, initCmd, rotateCmd, unsealCmd)
+	rootCmd.AddCommand(serveCmd, keygenCmd, encryptCmd, apikeyCmd, healthCmd, validateCmd, pingCmd, keyCmd, providerCmd, initCmd, rotateCmd, unsealCmd, versionCmd)
 }
 
 // loadConfig reads, defaults and validates the config file (secrets stay encrypted).

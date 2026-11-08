@@ -59,7 +59,7 @@ var keyAddCmd = &cobra.Command{
 		if err := f.Save(); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Added key %q (models: %s) to %s. Restart the server to apply.\n",
+		fmt.Fprintf(os.Stderr, "Added key %q (models: %s) to %s. A running router applies it automatically.\n",
 			args[0], strings.Join(models, ", "), v.GetString("config"))
 		fmt.Fprintln(os.Stderr, "Save this key now, it will not be shown again:")
 		fmt.Fprintln(cmd.OutOrStdout(), key)
@@ -94,7 +94,7 @@ var keyListCmd = &cobra.Command{
 
 var keyRemoveCmd = &cobra.Command{
 	Use:   "remove <name>",
-	Short: "Remove a client API key (revokes it after the server restarts)",
+	Short: "Remove a client API key (a running router revokes it on reload)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return removeItem("api_keys", args[0])
@@ -184,7 +184,7 @@ var providerAddCmd = &cobra.Command{
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Added provider %q to %s.\n", name, v.GetString("config"))
-		fmt.Fprintln(cmd.OutOrStdout(), "Reference it from models[].targets[].provider, then restart the server.")
+		fmt.Fprintln(cmd.OutOrStdout(), "Reference it from models[].targets[].provider; a running router reloads automatically.")
 		return nil
 	},
 }
@@ -258,7 +258,7 @@ func removeItem(section, name string) error {
 	if err := f.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("Removed %q from %s. Restart the server to apply.\n", name, section)
+	fmt.Printf("Removed %q from %s. A running router applies it automatically.\n", name, section)
 	return nil
 }
 

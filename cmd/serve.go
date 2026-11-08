@@ -127,7 +127,7 @@ var serveCmd = &cobra.Command{
 		httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 		errc := make(chan error, 1)
 		go func() { errc <- httpSrv.ListenAndServe() }()
-		log.Info("listening", "addr", listen, "sealed", inst == nil, "providers", len(cfg.Providers), "models", len(cfg.Models), "watch", serveWatch)
+		log.Info("listening", "version", version, "addr", listen, "sealed", inst == nil, "providers", len(cfg.Providers), "models", len(cfg.Models), "watch", serveWatch)
 		if inst == nil {
 			log.Warn("SEALED: no master key provided; POST it to /admin/unseal (e.g. `simple-router unseal`)")
 		}
