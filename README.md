@@ -29,8 +29,8 @@ An OpenRouter-compatible LLM router in Go.
 
 ```sh
 # e.g. macOS on Apple Silicon
-curl -LO https://github.com/gstos/SimpleLLMRouter/releases/download/v0.1.0/simple-router_0.1.0_darwin_arm64.tar.gz
-tar xzf simple-router_0.1.0_darwin_arm64.tar.gz
+curl -LO https://github.com/gstos/SimpleLLMRouter/releases/download/v0.2.0/simple-router_0.2.0_darwin_arm64.tar.gz
+tar xzf simple-router_0.2.0_darwin_arm64.tar.gz
 ./simple-router version
 ```
 
@@ -40,7 +40,8 @@ The macOS binaries aren't signed: if macOS blocks the first run, clear the downl
 **Container image** (`linux/amd64` and `linux/arm64`, so it runs natively on Apple Silicon):
 
 ```sh
-docker pull ghcr.io/gstos/simplellmrouter:0.1.0    # or :latest
+docker pull ghcr.io/gstos/simplellmrouter:0.2.0    # or :latest
+docker pull ghcr.io/gstos/simplellmrouter:0.2.0-acme   # with lego, for TLS mode acme
 ```
 
 **From source** (Go 1.27+):
@@ -510,13 +511,13 @@ for the lego image (`--build-arg VERSION=...` stamps a version, `--build-arg LEG
   wildcard and an encrypted credential on a sealed start, against
   [Pebble](https://github.com/letsencrypt/pebble)); then both multi-arch images (`linux/amd64`,
   `linux/arm64`). Pushes to `main` and `v*` tags publish them to `ghcr.io/gstos/simplellmrouter` as
-  `latest`, `main`, `sha-…`, and `0.1.0`/`0.1` for tags, each also with an `-acme` suffix. Pull
+  `latest`, `main`, `sha-…`, and `0.2.0`/`0.2` for tags, each also with an `-acme` suffix. Pull
   requests build without publishing.
 - **`.github/workflows/release.yml`**, when a GitHub release is published: runs the tests, then
   [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) attaches archives for
   linux/darwin/windows × amd64/arm64 and `checksums.txt`, keeping the release's own notes.
 
-To release, publish a release with a new `v*` tag, e.g. `gh release create v0.2.0 --generate-notes`.
+To release, publish a release with a new `v*` tag, e.g. `gh release create v0.3.0 --generate-notes`.
 To run the ACME test locally, install lego v5, `pebble` and `pebble-challtestsrv`
 (`go install github.com/letsencrypt/pebble/v2/cmd/...@v2.10.1`), then
 `go build -o bin/simple-router . && scripts/e2e-acme.sh bin/simple-router`.
