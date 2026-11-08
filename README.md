@@ -256,6 +256,9 @@ simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 
   and the messages (or `input`) up to the first user message, so every turn of a chat shares it.
   A client-sent value wins; requests with no conversation get a random one.
 - Each request is logged with provider, method, path, status and duration, never credentials.
+- `server.request_timeout` bounds uploads and upstream responses, including streams. A timeout
+  before response headers returns 504 (408 while reading a body for session derivation); after
+  streaming starts, the connection is terminated.
 - Passthrough-only providers (no `api_key`) are left out of health checks, since probing them needs
   the client's key.
 
