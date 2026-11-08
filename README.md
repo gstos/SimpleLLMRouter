@@ -4,6 +4,8 @@ An OpenRouter-compatible LLM router in Go.
 
 - **OpenRouter/OpenAI-compatible API**: chat completions (with streaming), completions,
   embeddings and rerank, under both `/api/v1` and `/v1`.
+- **Anthropic Messages API** (`/v1/messages`), routed natively to Anthropic-compatible providers
+  with the same priorities, failover and sticky routing.
 - **Priority lists per model**: lower priority first, round robin within a priority,
   failover to the next target when a provider fails.
 - **Sticky routing**: follow-up requests in a conversation stay on the same provider, so its
@@ -11,6 +13,9 @@ An OpenRouter-compatible LLM router in Go.
 - **Health checks**: background probes, a CLI check and an admin endpoint.
 - **Encrypted provider credentials** (AES-256-GCM) under a master key; the router starts
   **sealed** and waits for the key if none is provided.
+- **Passthrough** (`/pass/<provider>/...`): a plain proxy to one provider with the client's own
+  credentials, for any API format.
+- **Per-conversation session header** for providers that require one (e.g. OpenCode Go).
 - **Client API keys** with access to all models or to glob patterns, stored only as hashes.
 - **HTTPS** with automatic certificates from Let's Encrypt or any ACME CA (via
   [lego](https://go-acme.github.io/lego/), HTTP-01 or DNS-01 with wildcards), your own
@@ -93,10 +98,12 @@ providers:                         # OpenAI-compatible upstreams
     # auth_scheme: none            # default Bearer; "none" sends the raw key
     # headers: {X-Title: my-app}   # extra headers on every request
     # paths: {rerank: /v2/rerank, health: /models}   # per-endpoint path overrides
+    # session_header: X-Opencode-Session            # send a per-conversation id (see below)
+    # passthrough: true            # also expose it at /pass/openai/... (see "Passthrough")
 
 models:
   - name: openai/gpt-4o            # the id clients send
-    type: chat                     # chat (default) | embedding | rerank
+    type: chat                     # chat (default) | embedding | rerank | messages (Anthropic)
     targets:
       - {provider: openai, model: gpt-4o, priority: 1}
       - {provider: azure,  model: gpt-4o, priority: 1}         # same priority: round robin
@@ -107,6 +114,20 @@ api_keys:                          # client keys; only hashes are stored
     hash: sha256:...
     models: ["*"]                  # glob patterns; ["*"] or empty = all models
     admin: true                    # may call /admin endpoints
+```
+
+**Session header.** Some providers want an id tying requests to a conversation. OpenCode Go
+(`https://opencode.ai/zen/go/v1`) rejects third-party requests without `X-Opencode-Session`
+(HTTP 400 `MissingSessionID`). With `session_header` set, the router sends that header on every
+request to the provider, with an id that stays the same for every turn of a conversation: 32 hex
+characters hashed from the [sticky routing](#routing) key (client key, model and conversation), so
+the conversation and the key name aren't revealed. A value the client sends in that header is
+passed through instead, and requests that belong to no conversation (most embeddings, health
+probes) get a random id. Clients just use the router's URL and key; nothing else is needed:
+
+```sh
+simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 \
+  --session-header X-Opencode-Session
 ```
 
 The config is validated as a whole: unknown providers, duplicate names, plaintext credentials
@@ -120,7 +141,7 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 |---|---|
 | `serve [--watch=false] [--master-key-stdin] [--allow-remote-key-admin] [--lego PATH]` | Run the router. `--lego` (env `SIMPLE_ROUTER_LEGO`) picks the lego binary for TLS mode `acme`. |
 | `init [--listen ADDR]` | First use: creates the master key file (0600), a starter config with `master_key_check`, and an `admin` client key (printed once). Never overwrites. |
-| `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S]` | Encrypts the provider key with the master key and adds the provider. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
+| `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S] [--session-header H] [--passthrough]` | Encrypts the provider key with the master key and adds the provider. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
 | `key add <name> [--models a,b*] [--admin]` | Generates a client key, stores only its hash, prints the key once. Default access: all models. |
 | `key list` / `key remove <name>` | Names and access only; keys can't be recovered. |
@@ -156,13 +177,91 @@ or `X-Api-Key`. Errors use OpenRouter's shape: `{"error": {"code": 404, "message
 | POST | `/embeddings` | embedding models |
 | POST | `/rerank` | rerank models (Cohere/Jina style `{model, query, documents}`) |
 | GET | `/models` | the models this key can use |
+| POST | `/messages` | `messages` models (Anthropic Messages API); streaming supported |
+| POST | `/messages/count_tokens` | `messages` models |
 | GET | `/admin/health[?refresh=1]` | provider health and the served TLS certificate; admin keys; 503 if any provider is down |
 | POST | `/admin/unseal` | `{"master_key"}`; admin key, localhost only |
 | POST | `/admin/rotate-master-key` | `{"master_key", "new_master_key"?}` returns the new key; admin key, localhost only |
 | GET | `/healthz` | liveness, no auth: `ok`, or `sealed` (still 200) |
+| any | `/pass/<provider>/<path>` | forwarded unchanged to a `passthrough` provider, with the client's own credentials; see [Passthrough](#passthrough) |
 
 A model a key can't use gets the same 404 as an unknown model, so keys can't discover which models
 exist. Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
+
+### Anthropic Messages API
+
+`POST /v1/messages` (and `/v1/messages/count_tokens`) serves models of `type: messages`, with the
+same priorities, round robin, failover and sticky routing as chat. Requests and responses
+(streamed events included) are passed through in Anthropic's format: there is **no conversion**,
+so every target of a `messages` model must speak the Anthropic API (Anthropic itself, or
+compatible endpoints such as OpenCode Go's `/messages` models), and a `messages` model can't
+fall back to an OpenAI-format provider.
+
+```yaml
+providers:
+  - name: anthropic
+    base_url: https://api.anthropic.com/v1
+    api_key: enc:v1:...
+    auth_header: x-api-key
+    auth_scheme: none
+
+models:
+  - name: claude-sonnet-4-5        # the id clients send
+    type: messages
+    targets:
+      - {provider: anthropic, model: claude-sonnet-4-5, priority: 1}
+      - {provider: other-anthropic-compatible, model: claude-sonnet-4-5, priority: 2}
+```
+
+- Clients authenticate with their router key in `X-Api-Key` (the Anthropic SDKs' default) or
+  `Authorization: Bearer`. Point an Anthropic SDK or tool at `http://router:8080` (it adds
+  `/v1/messages`). Name the router's models after the ids the client sends.
+- `anthropic-version` and `anthropic-beta` are forwarded. The sticky key includes the top-level
+  `system` prompt. Overloaded (529) and other 5xx responses fail over.
+- The router's own errors use Anthropic's shape (`{"type": "error", "error": {"type":
+  "not_found_error", ...}}`); upstream errors are relayed as they are.
+- Health probes send `anthropic-version: 2023-06-01`, which Anthropic requires on `/models` and
+  other providers ignore; set it in a provider's `headers` to change it.
+
+### Passthrough
+
+For a plain proxy to one provider, mark it `passthrough: true`. `/pass/<provider>/<path>` is then
+forwarded to `<base_url>/<path>`: any method, path and query, request and response streamed
+unchanged, so formats the router doesn't implement (Anthropic `/messages`, OpenAI `/responses`...)
+work too.
+
+```yaml
+providers:
+  - name: opencode-go
+    base_url: https://opencode.ai/zen/go/v1
+    passthrough: true
+    session_header: X-Opencode-Session
+```
+
+```sh
+simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 \
+  --no-auth --passthrough --session-header X-Opencode-Session
+# clients: base URL http://router:8080/pass/opencode-go, API key = their own OpenCode Go key
+```
+
+- **The client's credentials go through untouched** (`Authorization`, `X-Api-Key`...). The router
+  doesn't check them and never adds the provider's stored `api_key`, so a passthrough-only
+  provider needs none. It also works while the router is sealed.
+- **Only providers marked `passthrough` are reachable**, never an arbitrary URL, and a path can't
+  climb above `base_url`. No `X-Forwarded-For` is added. Redirects are returned to the client, not
+  followed.
+- **No routing, failover or sticky pinning**: the target is the named provider. A provider can be
+  both a passthrough and a target of `models` (which use its stored key).
+- **`session_header`** works here too: the id is hashed from the system prompt / `instructions`
+  and the messages (or `input`) up to the first user message, so every turn of a chat shares it.
+  A client-sent value wins; requests with no conversation get a random one.
+- Each request is logged with provider, method, path, status and duration, never credentials.
+- Passthrough-only providers (no `api_key`) are left out of health checks, since probing them needs
+  the client's key.
+
+Since there is no router authentication on `/pass/`, anyone who can reach the router can relay
+through it to these providers (with their own provider key). Keep it on a trusted network, or
+behind a proxy that restricts access.
 
 ## Routing
 

@@ -92,3 +92,15 @@ func TestACMEValidation(t *testing.T) {
 		t.Errorf("defaults: %+v", a)
 	}
 }
+
+func TestSessionHeaderValidation(t *testing.T) {
+	for h, ok := range map[string]bool{"X-Opencode-Session": true, "x-session": true, "Bad Header": false, "a:b": false, "x\r\ny": false} {
+		cfg := base()
+		cfg.Providers = []Provider{{Name: "p", BaseURL: "https://x.test/v1", SessionHeader: h}}
+		cfg.ApplyDefaults()
+		err := cfg.Validate()
+		if ok != (err == nil) {
+			t.Errorf("%q: %v", h, err)
+		}
+	}
+}

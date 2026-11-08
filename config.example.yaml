@@ -70,6 +70,19 @@ providers:
       health: /models
   - name: local-vllm         # no api_key: no auth header is sent
     base_url: http://localhost:8000/v1
+  - name: anthropic          # Anthropic Messages API (models of type: messages)
+    base_url: https://api.anthropic.com/v1
+    api_key: enc:v1:REPLACE_ME
+    auth_header: x-api-key
+    auth_scheme: none
+  - name: opencode-go        # OpenCode Go subscription
+    base_url: https://opencode.ai/zen/go/v1
+    api_key: enc:v1:REPLACE_ME
+    session_header: X-Opencode-Session   # required: a per-conversation id is sent in it
+  - name: opencode-go-pass   # passthrough only: /pass/opencode-go-pass/<path> is forwarded
+    base_url: https://opencode.ai/zen/go/v1    # unchanged with the client's own key
+    passthrough: true                          # (not checked by the router: trusted networks)
+    session_header: X-Opencode-Session
 
 models:
   - name: openai/gpt-4o      # the id clients send
@@ -89,6 +102,11 @@ models:
     type: rerank
     targets:
       - { provider: cohere, model: rerank-v3.5 }
+
+  - name: claude-sonnet-4-5   # POST /v1/messages (Anthropic format, no conversion)
+    type: messages
+    targets:
+      - { provider: anthropic, model: claude-sonnet-4-5 }
 
   - name: local/llama
     targets:

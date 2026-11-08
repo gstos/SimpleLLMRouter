@@ -3,6 +3,8 @@ package health
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,8 +37,16 @@ type Checker struct {
 
 // New returns a Checker. onResult (optional) is called after every probe.
 func New(providers []config.Provider, timeout time.Duration, onResult func(Result)) *Checker {
+	// A passthrough-only provider (no stored key) can't be probed: the client
+	// brings the credentials.
+	var probed []config.Provider
+	for _, p := range providers {
+		if !p.Passthrough || p.APIKey != "" {
+			probed = append(probed, p)
+		}
+	}
 	return &Checker{
-		providers: providers,
+		providers: probed,
 		client: &http.Client{
 			Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -71,7 +81,13 @@ func (c *Checker) Check(ctx context.Context, p *config.Provider) Result {
 
 	req, err := http.NewRequestWithContext(ctx, p.HealthMethod, p.BaseURL+p.Path(config.EndpointHealth), nil)
 	if err == nil {
+		// Anthropic's API requires a version header, even on /models; other
+		// providers ignore it. A provider's own headers override it.
+		req.Header.Set("Anthropic-Version", AnthropicVersion)
 		SetAuth(req, p)
+		if p.SessionHeader != "" {
+			req.Header.Set(p.SessionHeader, RandomSession()) // no conversation to tie a probe to
+		}
 		var resp *http.Response
 		resp, err = c.client.Do(req)
 		if err == nil {
@@ -138,4 +154,15 @@ func SetAuth(req *http.Request, p *config.Provider) {
 	} else {
 		req.Header.Set(p.AuthHeader, p.AuthScheme+" "+p.APIKey)
 	}
+}
+
+// AnthropicVersion is sent on health probes (see Check).
+const AnthropicVersion = "2023-06-01"
+
+// RandomSession returns a random session id (32 hex chars) for requests that
+// belong to no conversation.
+func RandomSession() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

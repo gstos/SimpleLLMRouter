@@ -32,7 +32,7 @@ func TestUpstreamRedirectsDoNotForwardCredentials(t *testing.T) {
 			target := &router.Target{Provider: &config.Provider{
 				BaseURL: source.URL, AuthHeader: "api-key", AuthScheme: "none", APIKey: "provider-secret",
 			}}
-			_, err := s.send(context.Background(), httptest.NewRequest("POST", "/", nil), target, config.EndpointChat, []byte(`{}`))
+			_, err := s.send(context.Background(), httptest.NewRequest("POST", "/", nil), target, config.EndpointChat, []byte(`{}`), "")
 			if err == nil {
 				t.Fatal("redirect was not rejected")
 			}

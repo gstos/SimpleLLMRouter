@@ -57,7 +57,8 @@ func TestStickyPrefixIncludesFirstUserAfterInstructions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return stickyKey("client", "gpt", req, map[string]json.RawMessage{"messages": messages})
+		k, _ := stickyKey("client", "gpt", req, map[string]json.RawMessage{"messages": messages})
+		return k
 	}
 	if key("conversation one") == key("conversation two") {
 		t.Fatal("different conversations with shared instructions got the same sticky key")

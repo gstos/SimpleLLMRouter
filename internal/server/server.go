@@ -104,7 +104,12 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST "+prefix+"/embeddings", s.proxy(config.EndpointEmbeddings, []string{config.TypeEmbedding}))
 		mux.HandleFunc("POST "+prefix+"/rerank", s.proxy(config.EndpointRerank, []string{config.TypeRerank}))
 		mux.HandleFunc("GET "+prefix+"/models", s.models)
+		// Anthropic Messages API: same routing, Anthropic error shape.
+		messages := []string{config.TypeMessages}
+		mux.Handle("POST "+prefix+"/messages", anthropicErrors(s.proxy(config.EndpointMessages, messages)))
+		mux.Handle("POST "+prefix+"/messages/count_tokens", anthropicErrors(s.proxy(config.EndpointCountTokens, messages)))
 	}
+	mux.HandleFunc(PassPrefix, s.passthrough)
 	mux.HandleFunc("GET /admin/health", s.adminHealth)
 	mux.HandleFunc("POST /admin/unseal", s.unseal)
 	mux.HandleFunc("POST /admin/rotate-master-key", s.rotate)
@@ -270,7 +275,8 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), snap.cfg.Server.RequestTimeout)
 		defer cancel()
 
-		sticky := stickyKey(key.Name, model, r, body)
+		sticky, conversation := stickyKey(key.Name, model, r, body)
+		session := upstreamSession(sticky, conversation)
 		plan := snap.router.Plan(rt, sticky)
 		var lastErr string
 		var lastResp *capturedResponse
@@ -280,7 +286,7 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 			payload, _ := json.Marshal(body)
 
 			start := time.Now()
-			resp, err := s.send(ctx, r, t, endpoint, payload)
+			resp, err := s.send(ctx, r, t, endpoint, payload, session)
 			attempt := s.log.With("key", key.Name, "model", model, "target", t.ID, "attempt", i+1)
 
 			if err != nil {
@@ -321,9 +327,11 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 }
 
 // forwardHeaders are client headers passed through to providers.
-var forwardHeaders = []string{"Accept", "HTTP-Referer", "X-Title", "OpenAI-Organization", "Anthropic-Version"}
+var forwardHeaders = []string{"Accept", "HTTP-Referer", "X-Title", "OpenAI-Organization", "Anthropic-Version", "Anthropic-Beta"}
 
-func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, endpoint string, payload []byte) (*http.Response, error) {
+// send makes one upstream attempt. session is the conversation id sent in the
+// provider's session_header, if it has one.
+func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, endpoint string, payload []byte, session string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.Provider.BaseURL+t.Provider.Path(endpoint), bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -335,6 +343,12 @@ func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, e
 	}
 	req.Header.Set("Content-Type", "application/json")
 	health.SetAuth(req, t.Provider)
+	if h := t.Provider.SessionHeader; h != "" {
+		if v := in.Header.Get(h); v != "" {
+			session = v // the client's own id wins
+		}
+		req.Header.Set(h, session)
+	}
 	return s.client.Do(req)
 }
 
@@ -391,8 +405,9 @@ func retryable(status int) bool {
 // stickyKey identifies a "conversation" for cache affinity: client key + model +
 // session. The session is X-Session-Id, else the "user" field, else a hash of the
 // conversation prefix (through the first user message / prompt start), so distinct
-// conversations still spread across equal-priority providers.
-func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawMessage) string {
+// conversations still spread across equal-priority providers. conversation
+// reports whether a session was found (embeddings and rerank usually have none).
+func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawMessage) (key string, conversation bool) {
 	session := r.Header.Get("X-Session-Id")
 	if session == "" {
 		var user string
@@ -405,6 +420,10 @@ func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawM
 			var list []json.RawMessage
 			if json.Unmarshal(msgs, &list) == nil {
 				h := sha256.New()
+				if sys := body["system"]; len(sys) > 0 { // Anthropic: system prompt outside messages
+					h.Write(sys)
+					h.Write([]byte{0})
+				}
 				for _, msg := range list {
 					h.Write(msg)
 					var message struct {
@@ -421,7 +440,19 @@ func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawM
 			session = "p:" + hex.EncodeToString(h[:12])
 		}
 	}
-	return keyName + "\x00" + model + "\x00" + session
+	return keyName + "\x00" + model + "\x00" + session, session != ""
+}
+
+// upstreamSession is the id sent in a provider's session_header: a hash of the
+// sticky key, so every turn of a conversation shares it while the client key
+// name and the conversation content stay private. Requests that belong to no
+// conversation get a random id.
+func upstreamSession(sticky string, conversation bool) string {
+	if !conversation {
+		return health.RandomSession()
+	}
+	sum := sha256.Sum256([]byte(sticky))
+	return hex.EncodeToString(sum[:16])
 }
 
 type modelEntry struct {
@@ -507,8 +538,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeError uses OpenRouter's error shape.
+// writeError uses OpenRouter's error shape, or Anthropic's on /messages.
 func writeError(w http.ResponseWriter, status int, msg string) {
+	if _, ok := w.(*anthropicWriter); ok {
+		writeJSON(w, status, map[string]any{"type": "error", "error": map[string]any{"type": anthropicErrorType(status), "message": msg}})
+		return
+	}
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": status, "message": msg}})
 }
 

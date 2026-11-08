@@ -115,6 +115,8 @@ var (
 	provNoAuth     bool
 	provAuthHeader string
 	provAuthScheme string
+	provSessionHdr string
+	provPass       bool
 )
 
 var providerAddCmd = &cobra.Command{
@@ -127,7 +129,9 @@ var providerAddCmd = &cobra.Command{
 		"  printf %s \"$KEY\" | simple-router provider add openrouter --base-url https://openrouter.ai/api/v1\n" +
 		"  simple-router provider add azure --base-url https://x.openai.azure.com/openai/v1 \\\n" +
 		"      --auth-header api-key --auth-scheme none\n" +
-		"  simple-router provider add vllm --base-url http://localhost:8000/v1 --no-auth\n\n" +
+		"  simple-router provider add vllm --base-url http://localhost:8000/v1 --no-auth\n" +
+		"  simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 \\\n" +
+		"      --session-header X-Opencode-Session\n\n" +
 		"Other settings (headers, paths, health_method) can be edited in the YAML afterwards.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -150,10 +154,12 @@ var providerAddCmd = &cobra.Command{
 		}
 
 		p := configfile.Provider{
-			Name:       name,
-			BaseURL:    strings.TrimRight(provBaseURL, "/"),
-			AuthHeader: provAuthHeader,
-			AuthScheme: provAuthScheme,
+			Name:          name,
+			BaseURL:       strings.TrimRight(provBaseURL, "/"),
+			AuthHeader:    provAuthHeader,
+			AuthScheme:    provAuthScheme,
+			SessionHeader: provSessionHdr,
+			Passthrough:   provPass,
 		}
 		if !provNoAuth {
 			// Verify the master key before asking for the provider key.
@@ -353,6 +359,8 @@ func init() {
 	f.BoolVar(&provNoAuth, "no-auth", false, "provider needs no API key")
 	f.StringVar(&provAuthHeader, "auth-header", "", "header carrying the key (default Authorization)")
 	f.StringVar(&provAuthScheme, "auth-scheme", "", "prefix before the key (default Bearer; \"none\" sends the raw key)")
+	f.BoolVar(&provPass, "passthrough", false, "also expose it at /pass/<name>/... (client credentials forwarded unchecked; combine with --no-auth for passthrough only)")
+	f.StringVar(&provSessionHdr, "session-header", "", "send a per-conversation id in this header (e.g. X-Opencode-Session for OpenCode Go)")
 	_ = providerAddCmd.MarkFlagRequired("base-url")
 	providerCmd.AddCommand(providerAddCmd, providerListCmd, providerRemoveCmd)
 }

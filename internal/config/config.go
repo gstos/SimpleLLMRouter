@@ -18,6 +18,10 @@ const (
 	TypeChat      = "chat"
 	TypeEmbedding = "embedding"
 	TypeRerank    = "rerank"
+	// TypeMessages: Anthropic Messages API (/v1/messages), routed natively to
+	// providers that speak it. No format conversion: every target must accept
+	// Anthropic requests.
+	TypeMessages = "messages"
 )
 
 type Config struct {
@@ -197,6 +201,8 @@ func (t TLS) Fallback() bool { return t.FallbackSelfSigned == nil || *t.Fallback
 // Enabled reports whether the router serves HTTPS.
 func (t TLS) Enabled() bool { return t.Mode != TLSOff }
 
+var headerName = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$") // RFC 9110 token
+
 type Provider struct {
 	Name    string `mapstructure:"name"`
 	BaseURL string `mapstructure:"base_url"`
@@ -212,6 +218,25 @@ type Provider struct {
 	Paths map[string]string `mapstructure:"paths"`
 	// HealthMethod defaults to GET.
 	HealthMethod string `mapstructure:"health_method"`
+	// SessionHeader, when set, is sent on every upstream request with an id that
+	// is stable for the conversation (derived from the sticky key), e.g.
+	// X-Opencode-Session for OpenCode Go. A value the client sends in that
+	// header is passed through instead.
+	SessionHeader string `mapstructure:"session_header"`
+	// Passthrough exposes the provider at /pass/<name>/<path>: requests are
+	// forwarded unchanged with the client's own credentials (not checked by the
+	// router; the stored api_key is not used there).
+	Passthrough bool `mapstructure:"passthrough"`
+}
+
+// Provider returns the named provider, or nil.
+func (c *Config) Provider(name string) *Provider {
+	for i := range c.Providers {
+		if c.Providers[i].Name == name {
+			return &c.Providers[i]
+		}
+	}
+	return nil
 }
 
 type Model struct {
@@ -245,6 +270,8 @@ const (
 	EndpointCompletions = "completions"
 	EndpointEmbeddings  = "embeddings"
 	EndpointRerank      = "rerank"
+	EndpointMessages    = "messages"
+	EndpointCountTokens = "count_tokens"
 	EndpointHealth      = "health"
 )
 
@@ -253,6 +280,8 @@ var defaultPaths = map[string]string{
 	EndpointCompletions: "/completions",
 	EndpointEmbeddings:  "/embeddings",
 	EndpointRerank:      "/rerank",
+	EndpointMessages:    "/messages",
+	EndpointCountTokens: "/messages/count_tokens",
 	EndpointHealth:      "/models",
 }
 
@@ -376,6 +405,8 @@ func (c *Config) Validate() error {
 			add("providers[%d]: name is required", i)
 		case providers[p.Name]:
 			add("providers[%d]: duplicate name %q", i, p.Name)
+		case strings.Contains(p.Name, "/"):
+			add("provider %q: name must not contain \"/\"", p.Name)
 		}
 		providers[p.Name] = true
 		if u, err := url.Parse(p.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
@@ -383,6 +414,9 @@ func (c *Config) Validate() error {
 		}
 		if p.APIKey != "" && !secrets.IsEncrypted(p.APIKey) {
 			add("provider %q: api_key must be encrypted (use `simple-router encrypt`)", p.Name)
+		}
+		if p.SessionHeader != "" && !headerName.MatchString(p.SessionHeader) {
+			add("provider %q: session_header %q is not a valid header name", p.Name, p.SessionHeader)
 		}
 	}
 
@@ -396,9 +430,9 @@ func (c *Config) Validate() error {
 		}
 		models[m.Name] = true
 		switch m.Type {
-		case TypeChat, TypeEmbedding, TypeRerank:
+		case TypeChat, TypeEmbedding, TypeRerank, TypeMessages:
 		default:
-			add("model %q: unknown type %q (chat|embedding|rerank)", m.Name, m.Type)
+			add("model %q: unknown type %q (chat|embedding|rerank|messages)", m.Name, m.Type)
 		}
 		if len(m.Targets) == 0 {
 			add("model %q: at least one target is required", m.Name)
