@@ -66,9 +66,14 @@ func (s *snapshot) sealed() bool { return s.router == nil }
 func New(log *slog.Logger, opts Options) *Server {
 	s := &Server{
 		// No client-level timeout: streams can be long. The per-request context bounds it.
-		client: &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()},
-		log:    log,
-		opts:   opts,
+		client: &http.Client{
+			Transport: http.DefaultTransport.(*http.Transport).Clone(),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("upstream redirects are not allowed")
+			},
+		},
+		log:  log,
+		opts: opts,
 	}
 	s.Seal(&config.Config{})
 	return s

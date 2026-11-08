@@ -38,7 +38,12 @@ var pingCmd = &cobra.Command{
 		if isLocalURL(url) {
 			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // loopback liveness probe
 		}
-		client := &http.Client{Timeout: pingTimeout, Transport: tr}
+		client := &http.Client{
+			Timeout: pingTimeout, Transport: tr,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return fmt.Errorf("health endpoint redirects are not allowed")
+			},
+		}
 		resp, err := client.Get(url)
 		if err != nil {
 			return err
