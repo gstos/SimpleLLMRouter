@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gstos/SimpleLLMRouter/internal/auth"
 	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/health"
 )
@@ -45,8 +44,8 @@ func (s *Server) direct(w http.ResponseWriter, r *http.Request) {
 	if p == nil || p.Auth != config.AuthPassthrough {
 		// Authenticate before saying whether the provider exists, and answer
 		// unknown and not granted alike, so keys can't enumerate providers.
-		var key *auth.Key
-		if snap, key = s.authenticate(w, r); key == nil {
+		key := snap.authenticate(w, r)
+		if key == nil {
 			return
 		}
 		if p == nil || !key.AllowsProvider(name) {
@@ -57,7 +56,6 @@ func (s *Server) direct(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "router is sealed: waiting for the master key")
 			return
 		}
-		p = snap.cfg.Provider(name) // the decrypted config of this snapshot
 		keyName = key.Name
 	}
 	upstreamPath := path.Clean("/" + rest) // drops any "..": can't climb above base_url
