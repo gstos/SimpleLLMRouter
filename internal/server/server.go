@@ -385,7 +385,7 @@ func retryable(status int) bool {
 
 // stickyKey identifies a "conversation" for cache affinity: client key + model +
 // session. The session is X-Session-Id, else the "user" field, else a hash of the
-// conversation prefix (first two messages / prompt start), so distinct
+// conversation prefix (through the first user message / prompt start), so distinct
 // conversations still spread across equal-priority providers.
 func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawMessage) string {
 	session := r.Header.Get("X-Session-Id")
@@ -400,8 +400,14 @@ func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawM
 			var list []json.RawMessage
 			if json.Unmarshal(msgs, &list) == nil {
 				h := sha256.New()
-				for i := 0; i < len(list) && i < 2; i++ {
-					h.Write(list[i])
+				for _, msg := range list {
+					h.Write(msg)
+					var message struct {
+						Role string `json:"role"`
+					}
+					if json.Unmarshal(msg, &message) == nil && message.Role == "user" {
+						break
+					}
 				}
 				session = "p:" + hex.EncodeToString(h.Sum(nil)[:12])
 			}

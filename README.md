@@ -174,8 +174,8 @@ exist. Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
 3. **Sticky routing**: after a success, the conversation is pinned to that target for
    `sticky_ttl`, renewed on each request. A conversation is identified by client key + model +
    session, where the session is the `X-Session-Id` header, else the body's `user` field, else a
-   hash of the first two messages (or the prompt). Follow-ups stay on the same provider, even after
-   a failover, while separate conversations still spread across providers.
+   hash of the messages through the first user message (or the prompt). Follow-ups stay on the
+   same provider, even after a failover, while separate conversations still spread across providers.
 4. Providers that fail the background health check (`GET <base_url>/models`), and targets on
    cooldown, go to the back of the list. They are still tried as a last resort.
 
