@@ -207,3 +207,23 @@ func TestHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestHostsCanonicalIPs(t *testing.T) {
+	got := Hosts([]string{"2001:DB8:0::1", "[2001:db8::2]", "::ffff:10.0.0.9"})
+	want := []string{"localhost", "127.0.0.1", "::1", "2001:db8::1", "2001:db8::2", "10.0.0.9"}
+	if len(got) != len(want) {
+		t.Fatalf("%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%v", got)
+		}
+	}
+	// A non-canonical IPv6 domain must not regenerate the certificate on every check.
+	dir := t.TempDir()
+	m, err := New(config.TLS{Mode: config.TLSSelfSigned, Domains: []string{"2001:db8:0::1"}, MinVersion: "1.2"}, dir, quiet)
+	must(t, err)
+	if changed, err := m.Reload(); err != nil || changed {
+		t.Fatalf("regenerated on reload: changed=%v err=%v", changed, err)
+	}
+}

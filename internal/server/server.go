@@ -293,8 +293,9 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 		}
 
 		rt, ok := snap.router.Route(model)
-		// A key may use an alias when its patterns match the alias or the model.
-		if !ok || !(key.Allows(model) || key.Allows(rt.Name)) {
+		// Access is decided on the model's own name, so an alias never grants a
+		// key more than the model it points to.
+		if !ok || !key.Allows(rt.Name) {
 			// Same answer for unknown and forbidden so keys can't enumerate models.
 			writeError(w, http.StatusNotFound, fmt.Sprintf("model %q not found", model))
 			return
@@ -504,7 +505,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	data := []modelEntry{}
 	for _, rt := range snap.router.Models() {
 		for _, name := range append([]string{rt.Name}, rt.Aliases...) {
-			if key.Allows(name) || key.Allows(rt.Name) {
+			if key.Allows(rt.Name) {
 				data = append(data, modelEntry{ID: name, Object: "model", Type: rt.Type, OwnedBy: "simple-router"})
 			}
 		}

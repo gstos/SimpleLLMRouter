@@ -3,7 +3,6 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -74,6 +73,7 @@ var acmeEnvSetCmd = &cobra.Command{
 				return err
 			}
 		}
+		removeEnvKeys(f, name) // no differently-cased duplicate left behind
 		f.SetIn(dnsEnvPath, name, val)
 		if err := f.Save(); err != nil {
 			return err
@@ -104,7 +104,7 @@ var acmeEnvListCmd = &cobra.Command{
 			if secrets.IsEncrypted(val) {
 				val = "(encrypted)"
 			}
-			fmt.Fprintf(tw, "%s\t%s\n", e[0], val)
+			fmt.Fprintf(tw, "%s\t%s\n", strings.ToUpper(e[0]), val) // the router upper-cases names
 		}
 		return tw.Flush()
 	},
@@ -120,13 +120,13 @@ var acmeEnvRemoveCmd = &cobra.Command{
 			return err
 		}
 		name := strings.ToUpper(args[0])
-		if !f.RemoveIn(dnsEnvPath, name) {
+		if removeEnvKeys(f, name) == 0 {
 			return fmt.Errorf("%s is not set", name)
 		}
 		if err := f.Save(); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "Removed %s.\n", name)
+		fmt.Fprintf(cmd.OutOrStdout(), "Removed %s.\n", name)
 		return nil
 	},
 }
@@ -136,4 +136,17 @@ func init() {
 	acmeEnvSetCmd.Flags().BoolVar(&acmeEnvPlain, "plain", false, "store in plain text (non-secret settings only)")
 	acmeEnvCmd.AddCommand(acmeEnvSetCmd, acmeEnvListCmd, acmeEnvRemoveCmd)
 	acmeCmd.AddCommand(acmeEnvCmd)
+}
+
+// removeEnvKeys removes name from dns_env in any letter case (the router
+// upper-cases the names, so a hand-written lower-case key is the same variable)
+// and returns how many entries it removed.
+func removeEnvKeys(f *configfile.File, name string) int {
+	n := 0
+	for _, kv := range f.KeysIn(dnsEnvPath...) {
+		if strings.EqualFold(kv[0], name) && f.RemoveIn(dnsEnvPath, kv[0]) {
+			n++
+		}
+	}
+	return n
 }

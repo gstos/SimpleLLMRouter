@@ -137,9 +137,10 @@ simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 
 
 **Aliases.** A model's `aliases` are other ids clients may send for it, e.g. `bge-m3` and
 `baai/bge-m3`. They share the model's targets, round robin and sticky sessions: a conversation
-keeps its provider whichever name it uses. A key whose `models` patterns match either the alias or
-the model's name may use the alias. `GET /v1/models` lists aliases as entries of their own. Names
-and aliases must be unique across all models.
+keeps its provider whichever name it uses. Access is decided on the model's own name: a key may use
+an alias exactly when its `models` patterns allow the model, so adding an alias never grants a key
+anything new. `GET /v1/models` lists aliases as entries of their own. Names and aliases must be
+unique across all models.
 
 The config is validated as a whole: unknown providers, duplicate names, plaintext credentials
 and malformed hashes are reported together, with `simple-router validate`.
@@ -528,7 +529,8 @@ with the provider credentials.
 `LEGO_CA_CERTIFICATES` when `ca_file` is set, and the `dns_env` variables. Nothing else from the
 router's environment is passed, the master key included. lego's arguments are built by the router
 from the settings above. The config can't add arguments, `LEGO_*` variables (which can set hooks
-that run commands), loader or shell variables (`LD_*`, `DYLD_*`, `PATH`, `BASH_ENV`...), and the
+that run commands), loader or shell variables (`LD_*`, `DYLD_*`, `PATH`, `BASH_ENV`...) or Go runtime
+settings (`GODEBUG`, `GOMAXPROCS`...), and the
 `exec` DNS provider is refused. So write access to the config can't be turned into running commands.
 
 Changing `server.tls` (including `acme`) needs a restart; `dns_env` values are read on reload.

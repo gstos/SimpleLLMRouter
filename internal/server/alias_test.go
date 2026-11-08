@@ -110,3 +110,33 @@ func TestAliasListedInModels(t *testing.T) {
 		t.Fatalf("scoped key list: %s", b)
 	}
 }
+
+func TestAliasDoesNotWidenAccess(t *testing.T) {
+	up := newAnthUpstream(t, "a", nil)
+	cfg := &config.Config{
+		Providers: []config.Provider{{Name: "a", BaseURL: up.srv.URL + "/v1"}},
+		Models: []config.Model{
+			// An alias in the namespace a scoped key may use.
+			{Name: "private-model", Aliases: []string{"bge-private"}, Type: config.TypeEmbedding,
+				Targets: []config.Target{{Provider: "a", Model: "m"}}},
+		},
+		APIKeys: []config.APIKey{{Name: "scoped", Hash: auth.Hash(scopedKey), Models: []string{"bge-*"}}},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
+	srv.Update(cfg, router.New(cfg, nil), health.New(cfg.Providers, time.Second, nil))
+	h := srv.Handler()
+	if w := aliasPost(h, scopedKey, "bge-private"); w.Code != 404 {
+		t.Fatalf("alias granted a model the key may not use: %d", w.Code)
+	}
+	r := httptest.NewRequest("GET", "/v1/models", nil)
+	r.Header.Set("Authorization", "Bearer "+scopedKey)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if strings.Contains(w.Body.String(), "bge-private") {
+		t.Fatalf("alias listed for a key without access: %s", w.Body.String())
+	}
+}

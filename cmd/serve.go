@@ -211,7 +211,8 @@ var serveCmd = &cobra.Command{
 			if !decrypted {
 				for _, val := range env {
 					if secrets.IsEncrypted(val) {
-						return // needs the master key
+						acmeEnv.Store(nil) // needs the master key; drop any older env
+						return
 					}
 				}
 			}
@@ -276,7 +277,7 @@ var serveCmd = &cobra.Command{
 			if next.cfg.Server.Listen != listen {
 				log.Warn("server.listen changed; restart to apply", "running", listen, "configured", next.cfg.Server.Listen)
 			}
-			if !reflect.DeepEqual(next.cfg.Server.TLS, tlsCfg) {
+			if tlsChanged(tlsCfg, next.cfg.Server.TLS) {
 				log.Warn("server.tls changed; restart to apply (certificate files are reloaded live)")
 			}
 			if wasSealed && reason != "unseal" { // API unseals are logged by the server
@@ -295,6 +296,7 @@ var serveCmd = &cobra.Command{
 				} else {
 					srv.Seal(cfg)
 					setACMEEnv(cfg, false)
+					triggerACME() // runs only if the DNS env is now available
 					log.Info("config reloaded (still sealed)", "reason", reason)
 				}
 				return
@@ -509,6 +511,8 @@ func httpsRedirect(tlsListen string) http.Handler {
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
+		} else {
+			host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]") // "[::1]" without a port
 		}
 		if port != "" && port != "443" {
 			host = net.JoinHostPort(host, port)
@@ -680,4 +684,12 @@ func init() {
 	f.String("lego", "lego", "lego binary for TLS mode acme: name in PATH or a path (env SIMPLE_ROUTER_LEGO)")
 	_ = v.BindPFlag("lego", f.Lookup("lego"))
 	f.BoolVar(&serveRemoteKeyAdmin, "allow-remote-key-admin", false, "accept /admin/unseal and /admin/rotate-master-key from non-localhost clients (only behind TLS)")
+}
+
+// tlsChanged reports whether TLS settings that need a restart changed. dns_env
+// is left out: its values are read on every reload (and are encrypted in a
+// sealed config but decrypted after unseal).
+func tlsChanged(running, next config.TLS) bool {
+	running.ACME.DNSEnv, next.ACME.DNSEnv = nil, nil
+	return !reflect.DeepEqual(running, next)
 }

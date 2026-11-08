@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -279,6 +280,9 @@ func Hosts(domains []string) []string {
 	seen := map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
 	for _, d := range domains {
 		d = strings.TrimSpace(strings.ToLower(d))
+		if a, err := netip.ParseAddr(strings.Trim(d, "[]")); err == nil {
+			d = a.Unmap().String() // as the certificate stores it, so comparisons match
+		}
 		if d != "" && !seen[d] {
 			seen[d] = true
 			hosts = append(hosts, d)

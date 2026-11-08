@@ -29,6 +29,7 @@ import (
 )
 
 // MinMajor is the lego major version the router's arguments are written for.
+// It must match exactly: flags change between major versions.
 const MinMajor = 5
 
 // RunTimeout bounds one lego run (renewals may sleep a few minutes on purpose).

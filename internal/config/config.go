@@ -121,7 +121,7 @@ func (a ACME) validate() []string {
 		if a.DNSProvider == "" {
 			errs = append(errs, "dns_provider is required for challenge dns (see `lego dnshelp`)")
 		}
-		if !providerName.MatchString(a.DNSProvider) {
+		if a.DNSProvider != "" && !providerName.MatchString(a.DNSProvider) {
 			errs = append(errs, fmt.Sprintf("invalid dns_provider %q", a.DNSProvider))
 		}
 		if a.DNSProvider == "exec" {
@@ -155,12 +155,16 @@ func CheckLegoEnvName(name string) error {
 	if !envName.MatchString(name) {
 		return fmt.Errorf("dns_env: %q is not a valid variable name (A-Z, 0-9, _)", name)
 	}
-	for _, p := range []string{"LEGO_", "LD_", "DYLD_", "GO", "SSL_", "EXEC_"} {
+	for _, p := range []string{"LEGO_", "LD_", "DYLD_", "SSL_", "EXEC_"} {
 		if strings.HasPrefix(name, p) {
 			return fmt.Errorf("dns_env: %s* variables are not allowed (%s)", p, name)
 		}
 	}
 	switch name {
+	case "GODEBUG", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK", "GORACE", "GOFIPS140":
+		// Go runtime settings of the lego binary (GODEBUG can relax TLS checks).
+		// Other GO* names are allowed: GODADDY_*, GOOGLE_APPLICATION_CREDENTIALS...
+		return fmt.Errorf("dns_env: %s (a Go runtime setting) is not allowed", name)
 	case "PATH", "HOME", "SHELL", "IFS", "ENV", "BASH_ENV", "TMPDIR", "USER", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY":
 		return fmt.Errorf("dns_env: %s is set by the router and cannot be overridden", name)
 	}

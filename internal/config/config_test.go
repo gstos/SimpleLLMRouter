@@ -172,3 +172,16 @@ func TestProviderAuthValidation(t *testing.T) {
 		t.Fatalf("defaults: %+v", p)
 	}
 }
+
+func TestLegoEnvNameGoPrefix(t *testing.T) {
+	for _, ok := range []string{"GODADDY_API_KEY", "GODADDY_API_SECRET", "GOOGLE_APPLICATION_CREDENTIALS", "GCE_PROJECT"} {
+		if err := CheckLegoEnvName(ok); err != nil {
+			t.Errorf("%s refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"GODEBUG", "GOMAXPROCS", "GOTRACEBACK", "LEGO_HOOK", "LD_PRELOAD"} {
+		if CheckLegoEnvName(bad) == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+}

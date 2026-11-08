@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -96,6 +97,9 @@ func certName(path string) string {
 	leaf, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return ""
+	}
+	if now := time.Now(); now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
+		return "" // not served: the router falls back to its self-signed certificate
 	}
 	for _, ip := range leaf.IPAddresses {
 		if ip.Equal(net.IPv4(127, 0, 0, 1)) {
