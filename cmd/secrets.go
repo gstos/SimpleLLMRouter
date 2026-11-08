@@ -65,7 +65,7 @@ var encryptCmd = &cobra.Command{
 
 var apikeyCmd = &cobra.Command{
 	Use:   "apikey [existing-key]",
-	Short: "Generate a client API key and the hash to put in api_keys[].hash",
+	Short: "Print a client API key and its hash without editing the config (see `key add`)",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var key string

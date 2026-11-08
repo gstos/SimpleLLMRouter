@@ -1,3 +1,4 @@
 bin/
 *.key
 config.yaml
+.idea/

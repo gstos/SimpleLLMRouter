@@ -1,0 +1,195 @@
+// Package configfile edits the YAML config in place for the CLI helpers.
+//
+// It works on the yaml.v3 node tree rather than on decoded structs, so existing
+// comments, ordering and flow-style entries survive an edit.
+package configfile
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+
+	"go.yaml.in/yaml/v3"
+)
+
+// File is a config file loaded for editing.
+type File struct {
+	path string
+	doc  *yaml.Node // DocumentNode
+	mode fs.FileMode
+}
+
+// Load reads path. A missing file yields an empty document that Save will create.
+func Load(path string) (*File, error) {
+	f := &File{path: path, mode: 0o600}
+	b, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		b = nil
+	case err != nil:
+		return nil, err
+	default:
+		if st, err := os.Stat(path); err == nil {
+			f.mode = st.Mode().Perm()
+		}
+	}
+
+	var doc yaml.Node
+	if len(bytes.TrimSpace(b)) > 0 {
+		if err := yaml.Unmarshal(b, &doc); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+	}
+	if doc.Kind == 0 {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s: top level must be a mapping", path)
+	}
+	f.doc = &doc
+	return f, nil
+}
+
+// Save writes the file atomically, keeping its permissions (0600 for new files).
+func (f *File) Save() error {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(f.doc); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(f.path), ".config-*.yaml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(f.mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), f.path)
+}
+
+// Provider is the subset of provider settings the CLI writes.
+type Provider struct {
+	Name       string `yaml:"name"`
+	BaseURL    string `yaml:"base_url"`
+	APIKey     string `yaml:"api_key,omitempty"`
+	AuthHeader string `yaml:"auth_header,omitempty"`
+	AuthScheme string `yaml:"auth_scheme,omitempty"`
+}
+
+// APIKey is a client key entry.
+type APIKey struct {
+	Name   string   `yaml:"name"`
+	Hash   string   `yaml:"hash"`
+	Models []string `yaml:"models,flow"`
+	Admin  bool     `yaml:"admin,omitempty"`
+}
+
+// Entry is a list item summary for `list` commands.
+type Entry = map[string]any
+
+// AddProvider appends a provider; the name must be new.
+func (f *File) AddProvider(p Provider) error { return f.add("providers", p.Name, p) }
+
+// AddAPIKey appends a client key; the name must be new.
+func (f *File) AddAPIKey(k APIKey) error { return f.add("api_keys", k.Name, k) }
+
+// Remove deletes the named item from section ("providers" or "api_keys").
+// It reports whether an item was removed.
+func (f *File) Remove(section, name string) bool {
+	seq := f.seq(section, false)
+	if seq == nil {
+		return false
+	}
+	for i, item := range seq.Content {
+		if itemName(item) == name {
+			seq.Content = append(seq.Content[:i], seq.Content[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func (f *File) add(section, name string, v any) error {
+	seq := f.seq(section, true)
+	for _, item := range seq.Content {
+		if itemName(item) == name {
+			return fmt.Errorf("%s: %q already exists", section, name)
+		}
+	}
+	var n yaml.Node
+	if err := n.Encode(v); err != nil {
+		return err
+	}
+	seq.Content = append(seq.Content, &n)
+	return nil
+}
+
+// List decodes every item of a top-level sequence ("providers", "api_keys", "models").
+func (f *File) List(section string) ([]Entry, error) {
+	seq := f.seq(section, false)
+	if seq == nil {
+		return nil, nil
+	}
+	out := make([]Entry, 0, len(seq.Content))
+	for _, item := range seq.Content {
+		var e Entry
+		if err := item.Decode(&e); err != nil {
+			return nil, fmt.Errorf("%s: %w", section, err)
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// seq returns the sequence under a top-level key, creating it if asked.
+func (f *File) seq(key string, create bool) *yaml.Node {
+	root := f.doc.Content[0]
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			v := root.Content[i+1]
+			if v.Kind == yaml.SequenceNode {
+				return v
+			}
+			if !create {
+				return nil
+			}
+			// "key:" with no value (null): replace with an empty block sequence.
+			*v = yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+			return v
+		}
+	}
+	if !create {
+		return nil
+	}
+	seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, seq)
+	return seq
+}
+
+func itemName(item *yaml.Node) string {
+	if item.Kind != yaml.MappingNode {
+		return ""
+	}
+	for i := 0; i+1 < len(item.Content); i += 2 {
+		if item.Content[i].Value == "name" {
+			return item.Content[i+1].Value
+		}
+	}
+	return ""
+}

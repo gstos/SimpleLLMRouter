@@ -8,13 +8,29 @@ credentials and per-key model access.
 
 ```sh
 go build -o bin/simple-router .
-bin/simple-router keygen > master.key                     # keep this secret
-printf %s "$OPENAI_API_KEY" | bin/simple-router encrypt --master-key-file master.key
-bin/simple-router apikey                                  # client key + hash for api_keys[]
-cp config.example.yaml config.yaml                        # paste the enc:v1:... and sha256:... values
-bin/simple-router validate --master-key-file master.key
-bin/simple-router serve    --master-key-file master.key
+bin/simple-router keygen > master.key          # keep this secret
+export SIMPLE_ROUTER_MASTER_KEY_FILE=master.key
+cp config.example.yaml config.yaml             # or start from nothing: the helpers create the file
+
+bin/simple-router provider add openai --base-url https://api.openai.com/v1   # prompts for the key (hidden)
+bin/simple-router key add my-app --models 'openai/*'                          # prints the client key once
+# add models[] entries pointing at your providers, then:
+bin/simple-router validate
+bin/simple-router serve
 ```
+
+### Config helpers
+
+They edit the YAML in place (comments are kept; alignment of inline comments may be normalised).
+Restart the server after changes.
+
+| Command | Does |
+|---|---|
+| `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S]` | Encrypts the provider key with the master key and appends the provider. Without `--api-key` the key is read from piped stdin or prompted for with hidden input. |
+| `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
+| `key add <name> [--models a,b*] [--admin]` | Generates a client key, stores only its hash, prints the key once. Default access: all models. |
+| `key list` / `key remove <name>` | Names and access only; keys can't be recovered. |
+| `encrypt`, `apikey` | Lower-level: print an encrypted value / a key+hash without touching the config. |
 
 The master key can also come from `SIMPLE_ROUTER_MASTER_KEY` or `SIMPLE_ROUTER_MASTER_KEY_FILE`.
 The server will not start without it, or if any credential fails to decrypt.
@@ -52,7 +68,7 @@ Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
 ## CLI
 
 `serve`, `health` (probe all providers; exits non-zero if any is down, `--json`), `validate`,
-`keygen`, `encrypt`, `apikey`.
+`ping`, `keygen`, `encrypt`, `apikey`, `provider add|list|remove`, `key add|list|remove`.
 
 ## Docker
 
