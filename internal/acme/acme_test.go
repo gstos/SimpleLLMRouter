@@ -1,6 +1,7 @@
 package acme
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -84,5 +85,52 @@ func TestLookPathVersion(t *testing.T) {
 	}
 	if _, _, err := LookPath(filepath.Join(dir, "missing")); err == nil || !strings.Contains(err.Error(), "-acme container image") {
 		t.Fatalf("missing: %v", err)
+	}
+}
+
+func TestRunOnceResolvesPathsBeforeChangingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts")
+	}
+	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	// This stand-in records exactly what lego sees, without contacting a CA.
+	script := "#!/bin/sh\npwd > cwd.txt\nprintf '%s\\n' \"$@\" > args.txt\nprintf '%s\\n' \"$LEGO_CA_CERTIFICATES\" > ca.txt\n"
+	if err := os.WriteFile("lego", []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{
+		Lego: "./lego", LegoPath: "tls/lego", Webroot: "tls/webroot",
+		Cfg: config.ACME{Challenge: config.ChallengeHTTP, CAFile: "ca.pem"},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if err := r.runOnce(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join("tls", "lego", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	if got, want := read("cwd.txt"), filepath.Join(dir, "tls", "lego"); got != want {
+		t.Fatalf("cwd = %q, want %q", got, want)
+	}
+	args := read("args.txt")
+	for _, want := range []string{"--path\n" + filepath.Join(dir, "tls", "lego"), "--http.webroot\n" + filepath.Join(dir, "tls", "webroot")} {
+		if !strings.Contains(args, want) {
+			t.Errorf("arguments %q missing %q", args, want)
+		}
+	}
+	if got, want := read("ca.txt"), filepath.Join(dir, "ca.pem"); got != want {
+		t.Errorf("CA file = %q, want %q", got, want)
+	}
+	if r.LegoPath != "tls/lego" {
+		t.Error("runOnce modified runner configuration")
 	}
 }

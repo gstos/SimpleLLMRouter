@@ -61,6 +61,10 @@ func LookPath(name string) (path, version string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("lego not found (%v): use the -acme container image, or install lego v%d (e.g. `brew install lego`) and make sure it is in PATH or set --lego", err, MinMajor)
 	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving lego path: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, path, "--version").Output()
@@ -192,6 +196,20 @@ func (r *Runner) environ(dnsEnv map[string]string) ([]string, error) {
 }
 
 func (r *Runner) runOnce(ctx context.Context, dnsEnv map[string]string) error {
+	// cmd.Dir changes the child's working directory. Resolve paths against the
+	// router's working directory first, not against lego's account directory.
+	resolved := *r
+	for _, path := range []*string{&resolved.Lego, &resolved.LegoPath, &resolved.Webroot, &resolved.Cfg.CAFile} {
+		if *path == "" {
+			continue
+		}
+		abs, err := filepath.Abs(*path)
+		if err != nil {
+			return fmt.Errorf("resolving ACME path %q: %w", *path, err)
+		}
+		*path = abs
+	}
+	r = &resolved
 	if err := os.MkdirAll(r.LegoPath, 0o700); err != nil {
 		return err
 	}
