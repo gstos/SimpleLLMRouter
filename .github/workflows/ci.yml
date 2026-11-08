@@ -40,9 +40,42 @@ jobs:
       - name: build
         run: go build -o bin/simple-router .
 
-  image:
+  # TLS mode acme against Pebble (Let's Encrypt's test CA): HTTP-01, and DNS-01
+  # with a wildcard and an encrypted DNS credential on a sealed start.
+  e2e-acme:
     needs: test
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install lego, pebble and pebble-challtestsrv
+        run: |
+          go install github.com/go-acme/lego/v5@v5.6.0
+          go install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1
+          go install github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@v2.10.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: go build -o bin/simple-router .
+
+      - name: Run
+        run: scripts/e2e-acme.sh bin/simple-router
+
+  # Two images: the router alone (default) and the router plus lego (-acme tags).
+  image:
+    needs: [test, e2e-acme]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: runtime
+            suffix: ""
+          - target: acme
+            suffix: "-acme"
     permissions:
       contents: read
       packages: write # push to ghcr.io
@@ -65,6 +98,8 @@ jobs:
         with:
           # GHCR image names must be lowercase.
           images: ghcr.io/${{ github.repository_owner }}/simplellmrouter
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -73,17 +108,26 @@ jobs:
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # The tag suffix is not part of the binary's version.
+      - name: Binary version
+        id: ver
+        env:
+          V: ${{ steps.meta.outputs.version }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: echo "version=${V%"$SUFFIX"}" >> "$GITHUB_OUTPUT"
+
       # Pull requests build both architectures but push nothing.
       - name: Build (and push outside PRs)
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ steps.ver.outputs.version }}
             COMMIT=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}

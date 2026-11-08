@@ -17,12 +17,14 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 
+	"github.com/gstos/SimpleLLMRouter/internal/acme"
 	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/configfile"
 	"github.com/gstos/SimpleLLMRouter/internal/harden"
@@ -138,8 +140,20 @@ var serveCmd = &cobra.Command{
 
 		errLog := stdlog.New(serverErrorWriter{log}, "", 0)
 		httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, ErrorLog: errLog}
+		var legoBin string
+		if tlsCfg.Mode == config.TLSACME {
+			// Fail now, not at the first renewal, if lego can't be used.
+			var ver string
+			if legoBin, ver, err = acme.LookPath(v.GetString("lego")); err != nil {
+				return fmt.Errorf("tls mode acme: %w", err)
+			}
+			log.Info("acme: using lego", "path", legoBin, "version", ver)
+		}
+		cfgDir := filepath.Dir(v.GetString("config"))
+		tlsDir := tlsconf.Dir(tlsCfg, cfgDir)
+		webroot := filepath.Join(tlsDir, "webroot")
 		if tlsCfg.Enabled() {
-			if tlsMgr, err = tlsconf.New(tlsCfg, filepath.Dir(v.GetString("config")), log); err != nil {
+			if tlsMgr, err = tlsconf.New(tlsCfg, cfgDir, log); err != nil {
 				return fmt.Errorf("tls: %w", err)
 			}
 			httpSrv.TLSConfig = tlsMgr.TLSConfig()
@@ -154,7 +168,11 @@ var serveCmd = &cobra.Command{
 		}()
 		var redirectSrv *http.Server
 		if tlsCfg.HTTPListen != "" {
-			redirectSrv = &http.Server{Addr: tlsCfg.HTTPListen, Handler: httpsRedirect(listen), ReadHeaderTimeout: 10 * time.Second, ErrorLog: errLog}
+			var h http.Handler = httpsRedirect(listen)
+			if tlsCfg.Mode == config.TLSACME && tlsCfg.ACME.Challenge == config.ChallengeHTTP {
+				h = acmeChallenges(webroot, h)
+			}
+			redirectSrv = &http.Server{Addr: tlsCfg.HTTPListen, Handler: h, ReadHeaderTimeout: 10 * time.Second, ErrorLog: errLog}
 			go func() { errc <- redirectSrv.ListenAndServe() }()
 		}
 		scheme := "http"
@@ -164,6 +182,49 @@ var serveCmd = &cobra.Command{
 			log.Info("TLS enabled", "mode", tlsCfg.Mode, "source", i.Source, "subject", i.Subject,
 				"not_after", i.NotAfter, "fingerprint_sha256", i.FingerprintSHA256, "redirect_from", tlsCfg.HTTPListen)
 		}
+		// ACME: lego obtains/renews the certificate in the background.
+		var acmeEnv atomic.Pointer[map[string]string] // DNS env, decrypted; nil while unavailable
+		setACMEEnv := func(c *config.Config, decrypted bool) {
+			env := c.Server.TLS.ACME.DNSEnv
+			if !decrypted {
+				for _, val := range env {
+					if secrets.IsEncrypted(val) {
+						return // needs the master key
+					}
+				}
+			}
+			acmeEnv.Store(&env)
+		}
+		setACMEEnv(cfg, inst != nil)
+		var runner *acme.Runner
+		if tlsCfg.Mode == config.TLSACME {
+			runner = &acme.Runner{
+				Lego:     legoBin,
+				Cfg:      tlsCfg.ACME,
+				LegoPath: tlsconf.LegoPath(tlsDir),
+				Webroot:  webroot,
+				CertName: tlsconf.ACMECertName,
+				Log:      log,
+				Env: func() (map[string]string, bool) {
+					if p := acmeEnv.Load(); p != nil {
+						return *p, true
+					}
+					return nil, false
+				},
+				Issued: func() {
+					if _, err := tlsMgr.Reload(); err != nil {
+						log.Warn("acme: lego succeeded but the certificate could not be loaded", "err", err)
+					}
+				},
+			}
+			runner.Start(ctx)
+		}
+		triggerACME := func() {
+			if runner != nil {
+				runner.Trigger()
+			}
+		}
+
 		log.Info("listening", "version", version, "addr", listen, "scheme", scheme, "sealed", inst == nil, "providers", len(cfg.Providers), "models", len(cfg.Models), "watch", serveWatch)
 		if inst == nil {
 			log.Warn("SEALED: no master key provided; POST it to /admin/unseal (e.g. `simple-router unseal`)")
@@ -182,6 +243,10 @@ var serveCmd = &cobra.Command{
 			wasSealed := inst == nil
 			keys.set(ci)
 			srv.Update(next.cfg, next.router, next.checker)
+			setACMEEnv(next.cfg, true)
+			if wasSealed {
+				triggerACME() // DNS credentials may have been waiting for the key
+			}
 			stopInst()
 			inst = next
 			if next.cfg.Server.Listen != listen {
@@ -205,6 +270,7 @@ var serveCmd = &cobra.Command{
 					log.Error("config reload failed", "reason", reason, "err", err)
 				} else {
 					srv.Seal(cfg)
+					setACMEEnv(cfg, false)
 					log.Info("config reloaded (still sealed)", "reason", reason)
 				}
 				return
@@ -257,6 +323,7 @@ var serveCmd = &cobra.Command{
 			case <-hup:
 				reload("SIGHUP")
 				reloadCert("SIGHUP")
+				triggerACME()
 			case <-certChanged:
 				reloadCert("certificate file change")
 			case <-tlsTick:
@@ -375,6 +442,25 @@ func tlsWatchFiles(m *tlsconf.Manager) []string {
 		return nil
 	}
 	return m.WatchFiles()
+}
+
+// acmeChallenges serves HTTP-01 challenge files that lego writes into webroot;
+// everything else goes to next.
+func acmeChallenges(webroot string, next http.Handler) http.Handler {
+	const prefix = "/.well-known/acme-challenge/"
+	files := http.FileServer(http.Dir(webroot))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, prefix) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token := strings.TrimPrefix(r.URL.Path, prefix)
+		if token == "" || strings.ContainsAny(token, "/\\") || strings.HasPrefix(token, ".") {
+			http.NotFound(w, r) // no listings, no traversal, no dotfiles
+			return
+		}
+		files.ServeHTTP(w, r)
+	})
 }
 
 // httpsRedirect sends plain-HTTP requests to the same host on the TLS port.
@@ -552,5 +638,7 @@ func init() {
 	f := serveCmd.Flags()
 	f.BoolVar(&serveWatch, "watch", true, "reload automatically when the config or master key file changes")
 	f.BoolVar(&serveKeyStdin, "master-key-stdin", false, "read the master key once from stdin (prompted on a terminal) and keep it only in memory")
+	f.String("lego", "lego", "lego binary for TLS mode acme: name in PATH or a path (env SIMPLE_ROUTER_LEGO)")
+	_ = v.BindPFlag("lego", f.Lookup("lego"))
 	f.BoolVar(&serveRemoteKeyAdmin, "allow-remote-key-admin", false, "accept /admin/unseal and /admin/rotate-master-key from non-localhost clients (only behind TLS)")
 }

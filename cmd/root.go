@@ -48,7 +48,7 @@ func init() {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	v.AutomaticEnv()
 
-	rootCmd.AddCommand(serveCmd, keygenCmd, encryptCmd, apikeyCmd, healthCmd, validateCmd, pingCmd, keyCmd, providerCmd, initCmd, rotateCmd, unsealCmd, versionCmd)
+	rootCmd.AddCommand(serveCmd, keygenCmd, encryptCmd, apikeyCmd, healthCmd, validateCmd, pingCmd, keyCmd, providerCmd, initCmd, rotateCmd, unsealCmd, versionCmd, acmeCmd)
 }
 
 // loadConfig reads, defaults and validates the config file (secrets stay encrypted).

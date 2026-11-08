@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/gstos/SimpleLLMRouter/internal/auth"
 	"github.com/gstos/SimpleLLMRouter/internal/configfile"
@@ -141,7 +142,7 @@ var rotateMasterCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Re-encrypted %d provider credential(s); new master key in %s.\n", n, out)
+		fmt.Fprintf(cmd.OutOrStdout(), "Re-encrypted %d credential(s); new master key in %s.\n", n, out)
 		if inPlace {
 			fmt.Fprintln(cmd.OutOrStdout(), "A running router using this key file switches automatically. The old key no longer works.")
 		} else {
@@ -270,28 +271,28 @@ func rotateMaster(f *configfile.File, oldCi *secrets.Cipher, newKey, keyOut stri
 	if err != nil {
 		return 0, nil, err
 	}
-	provs, err := f.List("providers")
-	if err != nil {
-		return 0, nil, err
-	}
+	// Every encrypted value in the file: provider keys, ACME DNS credentials...
 	n := 0
-	for _, p := range provs {
-		name, _ := p["name"].(string)
-		val := f.Field("providers", name, "api_key")
-		if !secrets.IsEncrypted(val) {
-			continue
+	var encErr error
+	f.WalkScalars(func(node *yaml.Node) {
+		if encErr != nil || !secrets.IsEncrypted(node.Value) {
+			return
 		}
-		pt, err := oldCi.Decrypt(val)
+		pt, err := oldCi.Decrypt(node.Value)
 		if err != nil {
-			warn(fmt.Sprintf("provider %q: %v; left unchanged", name, err))
-			continue
+			warn(fmt.Sprintf("value on line %d: %v; left unchanged", node.Line, err))
+			return
 		}
 		enc, err := newCi.Encrypt(pt)
 		if err != nil {
-			return 0, nil, err
+			encErr = err
+			return
 		}
-		f.SetField("providers", name, "api_key", enc)
+		node.Value = enc
 		n++
+	})
+	if encErr != nil {
+		return 0, nil, encErr
 	}
 	f.SetScalar("master_key_check", newCi.KeyCheck(), keyCheckComment)
 

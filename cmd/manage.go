@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"go.yaml.in/yaml/v3"
 	"golang.org/x/term"
 
 	"github.com/gstos/SimpleLLMRouter/internal/auth"
@@ -290,19 +291,16 @@ func verifyCipher(f *configfile.File, ci *secrets.Cipher) error {
 	if check := f.Scalar("master_key_check"); check != "" && !ci.VerifyKeyCheck(check) {
 		return config.ErrWrongMasterKey
 	}
-	provs, err := f.List("providers")
-	if err != nil {
-		return err
-	}
-	for _, p := range provs {
-		if v, _ := p["api_key"].(string); secrets.IsEncrypted(v) {
-			// Only authentication failures prove a wrong key; malformed placeholders are skipped.
-			if _, err := ci.Decrypt(v); errors.Is(err, secrets.ErrDecrypt) {
-				return fmt.Errorf("%w (it cannot decrypt the api_key of provider %q)", config.ErrWrongMasterKey, p["name"])
+	// Only authentication failures prove a wrong key; malformed placeholders are skipped.
+	var bad error
+	f.WalkScalars(func(n *yaml.Node) {
+		if bad == nil && secrets.IsEncrypted(n.Value) {
+			if _, err := ci.Decrypt(n.Value); errors.Is(err, secrets.ErrDecrypt) {
+				bad = fmt.Errorf("%w (it cannot decrypt the value on line %d)", config.ErrWrongMasterKey, n.Line)
 			}
 		}
-	}
-	return nil
+	})
+	return bad
 }
 
 // interactiveCipher is masterCipher, but prompts for the master key (hidden)

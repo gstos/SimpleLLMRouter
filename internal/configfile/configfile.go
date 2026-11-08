@@ -297,3 +297,95 @@ func (f *File) SetMapping(key string, v any) error {
 	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &n)
 	return nil
 }
+
+// WalkScalars calls fn for every scalar value node in the document (not keys).
+// fn may change the node's Value in place.
+func (f *File) WalkScalars(fn func(n *yaml.Node)) {
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		switch n.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, c := range n.Content {
+				walk(c)
+			}
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				walk(n.Content[i+1])
+			}
+		case yaml.ScalarNode:
+			fn(n)
+		}
+	}
+	walk(f.doc)
+}
+
+// MapAt returns the mapping at the given key path (e.g. "server", "tls",
+// "acme", "dns_env"), creating missing levels when create is set. It returns
+// nil if the path is missing (or not a mapping) and create is false.
+func (f *File) MapAt(create bool, path ...string) *yaml.Node {
+	n := f.doc.Content[0]
+	for _, key := range path {
+		var next *yaml.Node
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == key {
+				next = n.Content[i+1]
+				break
+			}
+		}
+		if next == nil || next.Kind != yaml.MappingNode {
+			if !create {
+				return nil
+			}
+			m := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			if next != nil { // e.g. "key:" with a null value
+				*next = *m
+			} else {
+				n.Content = append(n.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, m)
+				next = m
+			}
+		}
+		n = next
+	}
+	return n
+}
+
+// SetIn sets key to a string value in the mapping at path (created as needed).
+func (f *File) SetIn(path []string, key, value string) {
+	m := f.MapAt(true, path...)
+	v := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content[i+1] = v
+			return
+		}
+	}
+	m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, v)
+}
+
+// RemoveIn deletes key from the mapping at path; it reports whether it existed.
+func (f *File) RemoveIn(path []string, key string) bool {
+	m := f.MapAt(false, path...)
+	if m == nil {
+		return false
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content = append(m.Content[:i], m.Content[i+2:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// KeysIn lists the keys of the mapping at path, with their values.
+func (f *File) KeysIn(path ...string) [][2]string {
+	m := f.MapAt(false, path...)
+	if m == nil {
+		return nil
+	}
+	var out [][2]string
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		out = append(out, [2]string{m.Content[i].Value, m.Content[i+1].Value})
+	}
+	return out
+}

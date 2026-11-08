@@ -12,8 +12,9 @@ An OpenRouter-compatible LLM router in Go.
 - **Encrypted provider credentials** (AES-256-GCM) under a master key; the router starts
   **sealed** and waits for the key if none is provided.
 - **Client API keys** with access to all models or to glob patterns, stored only as hashes.
-- **HTTPS** with your own certificates (renewed by any tool, swapped in live) or a generated
-  self-signed one.
+- **HTTPS** with automatic certificates from Let's Encrypt or any ACME CA (via
+  [lego](https://go-acme.github.io/lego/), HTTP-01 or DNS-01 with wildcards), your own
+  certificates (renewed by any tool), or a generated self-signed one, all swapped in live.
 - **Hot reload** of the config, live key rotation, and a CLI to manage it all.
 
 ## Install
@@ -117,7 +118,7 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 
 | Command | Does |
 |---|---|
-| `serve [--watch=false] [--master-key-stdin] [--allow-remote-key-admin]` | Run the router. |
+| `serve [--watch=false] [--master-key-stdin] [--allow-remote-key-admin] [--lego PATH]` | Run the router. `--lego` (env `SIMPLE_ROUTER_LEGO`) picks the lego binary for TLS mode `acme`. |
 | `init [--listen ADDR]` | First use: creates the master key file (0600), a starter config with `master_key_check`, and an `admin` client key (printed once). Never overwrites. |
 | `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S]` | Encrypts the provider key with the master key and adds the provider. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
@@ -126,6 +127,8 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 | `rotate master-key [--out FILE] [--api [--ca-file F] [--insecure]]` | New master key; every provider credential is re-encrypted. See [Rotation](#rotation). |
 | `rotate key <name>` | New client key with the same access; the old one stops working. |
 | `rotate provider <name> [--api-key K]` | Replaces an upstream credential (prompted or piped like `provider add`). |
+| `acme env set <NAME> [--value V] [--plain]` | Sets a DNS provider variable for lego (e.g. `CLOUDFLARE_DNS_API_TOKEN`), encrypted with the master key unless `--plain`. Without `--value`, read from piped stdin or a hidden prompt. |
+| `acme env list` / `acme env remove <NAME>` | List shows encrypted values as `(encrypted)` and `--plain` ones as they are. |
 | `unseal [--url URL] [--ca-file F] [--insecure]` | Sends the master key to a running, sealed router. |
 | `health [--json]` | Probes every provider; exits non-zero if any is down. |
 | `validate` | Checks the config; with a master key, also that every secret decrypts. |
@@ -254,6 +257,7 @@ Set `server.tls.mode` (a restart is needed to change the mode; certificates them
 | `off` (default) | plain HTTP |
 | `file` | `cert_file` + `key_file` (PEM, chain allowed), written by any tool: lego, certbot, acme.sh, cert-manager, a script |
 | `self-signed` | generated on first start, stored in `dir` (default `tls/` next to the config), renewed 30 days before expiry. Covers `localhost`, `127.0.0.1`, `::1` and `domains` |
+| `acme` | obtained and renewed by the router running [lego](https://go-acme.github.io/lego/) against Let's Encrypt or any ACME CA. See [ACME](#acme-lets-encrypt) |
 
 ```yaml
 server:
@@ -287,6 +291,64 @@ issued for. `--insecure` skips verification and is accepted only for localhost U
 HTTPS automatically. `/admin/health` shows the served certificate: source, names, expiry and
 fingerprint.
 
+### ACME (Let's Encrypt)
+
+In `acme` mode the router drives [lego](https://go-acme.github.io/lego/) v5, the official certificate
+manager for simple-router. lego must be in `PATH` (or set `--lego` / `SIMPLE_ROUTER_LEGO`); the
+`-acme` container image includes it. `serve` checks for lego at startup and refuses to start without
+it, rather than failing at the first renewal.
+
+```yaml
+server:
+  listen: ":8443"
+  tls:
+    mode: acme
+    acme:
+      email: admin@example.com
+      domains: [router.example.com, "*.router.example.com"]
+      challenge: dns                   # default; or http
+      dns_provider: cloudflare         # any lego DNS provider: `lego dnshelp`
+      dns_env:
+        CLOUDFLARE_DNS_API_TOKEN: enc:v1:...   # set with `simple-router acme env set`
+```
+
+```sh
+simple-router acme env set CLOUDFLARE_DNS_API_TOKEN      # prompts, stores it encrypted
+simple-router acme env set AWS_REGION --value eu-west-1 --plain
+```
+
+| Setting | Default | |
+|---|---|---|
+| `email`, `domains` | required | account contact and certificate names |
+| `server` | `letsencrypt` | `letsencrypt-staging` (use it while testing: production has strict rate limits), `zerossl`, or a directory URL |
+| `ca_file` | | PEM bundle to trust a private ACME server (step-ca, Pebble) |
+| `key_type` | `EC256` | `EC384`, `RSA2048`, `RSA3072`, `RSA4096` |
+| `challenge` | `dns` | `dns`: no inbound port, allows wildcards. `http`: needs `http_listen` reachable on port 80 for every domain |
+| `dns_provider`, `dns_env` | | lego's provider code and its variables (`lego dnshelp -c <provider>` lists them) |
+| `dns_resolvers`, `dns_propagation_wait` | | optional propagation-check tuning |
+| `check_interval` | `12h` | how often lego is run |
+
+**How it works.** lego runs at startup and then every `check_interval`; `lego run` renews only when
+the certificate is due, otherwise it does nothing. Failures are retried with backoff (1 minute
+doubling to 1 hour) and lego's log lines are relayed into the router's log. The account and
+certificates live in `<dir>/lego/` (default `tls/lego/` next to the config). Each new certificate
+is swapped in live, as in `file` mode. Until the first one is issued, the self-signed fallback is
+served. With `challenge: http`, the router answers `/.well-known/acme-challenge/` on `http_listen`
+and redirects everything else to HTTPS. `SIGHUP` triggers a run immediately.
+
+**Sealed start.** Encrypted `dns_env` values are decrypted with the master key, so on a sealed start
+lego waits; it runs as soon as the router is unsealed. Rotating the master key re-encrypts them along
+with the provider credentials.
+
+**What lego can see.** lego gets a minimal environment: `PATH`, `HOME` (its own directory),
+`LEGO_CA_CERTIFICATES` when `ca_file` is set, and the `dns_env` variables. Nothing else from the
+router's environment is passed, the master key included. lego's arguments are built by the router
+from the settings above. The config can't add arguments, `LEGO_*` variables (which can set hooks
+that run commands), loader or shell variables (`LD_*`, `DYLD_*`, `PATH`, `BASH_ENV`...), and the
+`exec` DNS provider is refused. So write access to the config can't be turned into running commands.
+
+Changing `server.tls` (including `acme`) needs a restart; `dns_env` values are read on reload.
+
 ## Docker
 
 ```sh
@@ -317,20 +379,42 @@ docker run -d -p 8080:8080 \
   certificates in the config volume, e.g. `cert_file: certs/router.crt`, so a tool writing into
   `conf/certs/` on the host (or a sidecar sharing the volume) rotates them live.
 
-Build locally with `docker build -t simple-router .` (pass `--build-arg VERSION=...` to stamp a version).
+Two images are published:
+
+| Image | Contents |
+|---|---|
+| `ghcr.io/gstos/simplellmrouter:<tag>` | the router only |
+| `ghcr.io/gstos/simplellmrouter:<tag>-acme` (e.g. `latest-acme`, `0.2.0-acme`) | the router plus lego v5, for TLS mode `acme` |
+
+```sh
+docker run -d --name router -p 443:8443 \
+  -v $PWD/conf:/etc/simple-router ghcr.io/gstos/simplellmrouter:latest-acme
+```
+
+lego keeps its account and certificates in the config volume (`tls/lego/`), so they survive
+container restarts. For `challenge: http`, also publish port 80 to `http_listen`.
+
+Build locally with `docker build -t simple-router .`, or `docker build --target acme -t simple-router:acme .`
+for the lego image (`--build-arg VERSION=...` stamps a version, `--build-arg LEGO_VERSION=v5.x.y` picks lego).
 
 ## CI and releases
 
 - **`.github/workflows/ci.yml`**, on every push and pull request: gofmt, `go vet`,
-  `go test -race`, then a multi-arch image (`linux/amd64`, `linux/arm64`). Pushes to `main` and
-  `v*` tags publish it to `ghcr.io/gstos/simplellmrouter` as `latest`, `main`, `sha-…`, and
-  `0.1.0`/`0.1` for tags. Pull requests build without publishing.
+  `go test -race`; an end-to-end ACME test (`scripts/e2e-acme.sh`: HTTP-01, and DNS-01 with a
+  wildcard and an encrypted credential on a sealed start, against
+  [Pebble](https://github.com/letsencrypt/pebble)); then both multi-arch images (`linux/amd64`,
+  `linux/arm64`). Pushes to `main` and `v*` tags publish them to `ghcr.io/gstos/simplellmrouter` as
+  `latest`, `main`, `sha-…`, and `0.1.0`/`0.1` for tags, each also with an `-acme` suffix. Pull
+  requests build without publishing.
 - **`.github/workflows/release.yml`**, when a GitHub release is published: runs the tests, then
   [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) attaches archives for
   linux/darwin/windows × amd64/arm64 and `checksums.txt`, keeping the release's own notes.
 
 To release, publish a release with a new `v*` tag, e.g. `gh release create v0.2.0 --generate-notes`.
-To try the build locally: `go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean`.
+To run the ACME test locally, install lego v5, `pebble` and `pebble-challtestsrv`
+(`go install github.com/letsencrypt/pebble/v2/cmd/...@v2.10.1`), then
+`go build -o bin/simple-router . && scripts/e2e-acme.sh bin/simple-router`.
+To try the release build locally: `go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean`.
 
 ## License
 

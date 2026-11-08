@@ -67,8 +67,15 @@ func clientTLS(rawURL string, cfg *config.Config) (*tls.Config, error) {
 	if b, err := os.ReadFile(filepath.Join(tlsconf.Dir(cfg.Server.TLS, base), tlsconf.SelfSignedCert)); err == nil {
 		pool.AppendCertsFromPEM(b) // self-signed mode, or the file-mode fallback
 	}
-	if local && cfg.Server.TLS.Mode == config.TLSFile {
-		if name := certName(resolvePath(base, cfg.Server.TLS.CertFile)); name != "" {
+	if local {
+		certFile := ""
+		switch cfg.Server.TLS.Mode {
+		case config.TLSFile:
+			certFile = resolvePath(base, cfg.Server.TLS.CertFile)
+		case config.TLSACME:
+			certFile, _ = tlsconf.ACMEPaths(tlsconf.Dir(cfg.Server.TLS, base))
+		}
+		if name := certName(certFile); name != "" {
 			tc.ServerName = name
 		}
 	}

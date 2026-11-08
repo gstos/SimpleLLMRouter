@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -45,10 +46,122 @@ const (
 	TLSOff        = "off"
 	TLSFile       = "file"
 	TLSSelfSigned = "self-signed"
+	TLSACME       = "acme"
 )
 
+// ACME challenge types.
+const (
+	ChallengeHTTP = "http"
+	ChallengeDNS  = "dns"
+)
+
+// ACME configures acme mode: the router runs lego (found in PATH) to obtain and
+// renew the certificate. Options map to lego flags the router builds itself;
+// no command, hook or LEGO_* variable can be set from here.
+type ACME struct {
+	Email   string   `mapstructure:"email"`
+	Domains []string `mapstructure:"domains"`
+	// Server: ACME directory URL or a lego shortcode (letsencrypt,
+	// letsencrypt-staging, zerossl...). Default: letsencrypt.
+	Server string `mapstructure:"server"`
+	// CAFile: PEM bundle to trust for a private ACME server (step-ca, Pebble).
+	CAFile string `mapstructure:"ca_file"`
+	// KeyType: EC256 (default), EC384, RSA2048, RSA3072, RSA4096.
+	KeyType string `mapstructure:"key_type"`
+
+	// Challenge: "dns" (default; no inbound port, allows wildcards) or "http"
+	// (needs server.tls.http_listen reachable on port 80 for every domain).
+	Challenge string `mapstructure:"challenge"`
+	// DNSProvider: lego provider code (cloudflare, route53, gcloud...); see `lego dnshelp`.
+	DNSProvider string `mapstructure:"dns_provider"`
+	// DNSEnv: the provider's credentials/settings as env vars for lego, e.g.
+	// CLOUDFLARE_DNS_API_TOKEN. Values may be enc:v1: (decrypted with the master
+	// key; `simple-router acme env set` writes them). LEGO_*, loader and shell
+	// variables are refused.
+	DNSEnv map[string]string `mapstructure:"dns_env"`
+	// DNSResolvers: host:port resolvers for propagation checks (optional).
+	DNSResolvers []string `mapstructure:"dns_resolvers"`
+	// DNSPropagationWait: skip propagation checks and just wait this long (optional).
+	DNSPropagationWait time.Duration `mapstructure:"dns_propagation_wait"`
+
+	// CheckInterval: how often lego is run; it renews only when due (default 12h).
+	CheckInterval time.Duration `mapstructure:"check_interval"`
+}
+
+func (a ACME) validate() []string {
+	var errs []string
+	if a.Email == "" {
+		errs = append(errs, "email is required")
+	}
+	if len(a.Domains) == 0 {
+		errs = append(errs, "at least one domain is required")
+	}
+	for _, d := range a.Domains {
+		if strings.HasPrefix(d, "*.") && a.Challenge != ChallengeDNS {
+			errs = append(errs, fmt.Sprintf("wildcard %q needs challenge dns", d))
+		}
+	}
+	switch a.KeyType {
+	case "EC256", "EC384", "RSA2048", "RSA3072", "RSA4096":
+	default:
+		errs = append(errs, fmt.Sprintf("unknown key_type %q", a.KeyType))
+	}
+	switch a.Challenge {
+	case ChallengeDNS:
+		if a.DNSProvider == "" {
+			errs = append(errs, "dns_provider is required for challenge dns (see `lego dnshelp`)")
+		}
+		if !providerName.MatchString(a.DNSProvider) {
+			errs = append(errs, fmt.Sprintf("invalid dns_provider %q", a.DNSProvider))
+		}
+		if a.DNSProvider == "exec" {
+			errs = append(errs, "dns_provider exec runs a program and is not allowed")
+		}
+	case ChallengeHTTP:
+		if len(a.DNSEnv) > 0 || a.DNSProvider != "" {
+			errs = append(errs, "dns_provider/dns_env apply to challenge dns only")
+		}
+	default:
+		errs = append(errs, fmt.Sprintf("unknown challenge %q (dns|http)", a.Challenge))
+	}
+	for name := range a.DNSEnv {
+		if err := CheckLegoEnvName(name); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	return errs
+}
+
+var (
+	providerName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+	envName      = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+)
+
+// CheckLegoEnvName refuses variables that could make lego (or the loader) run
+// code or change its behaviour: LEGO_* (every lego flag, including hooks, can
+// be set that way), dynamic loader variables, and process basics the router
+// sets itself.
+func CheckLegoEnvName(name string) error {
+	if !envName.MatchString(name) {
+		return fmt.Errorf("dns_env: %q is not a valid variable name (A-Z, 0-9, _)", name)
+	}
+	for _, p := range []string{"LEGO_", "LD_", "DYLD_", "GO", "SSL_", "EXEC_"} {
+		if strings.HasPrefix(name, p) {
+			return fmt.Errorf("dns_env: %s* variables are not allowed (%s)", p, name)
+		}
+	}
+	switch name {
+	case "PATH", "HOME", "SHELL", "IFS", "ENV", "BASH_ENV", "TMPDIR", "USER", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY":
+		return fmt.Errorf("dns_env: %s is set by the router and cannot be overridden", name)
+	}
+	return nil
+}
+
+// LegoDir is where lego keeps its account and certificates, under the TLS dir.
+const LegoDir = "lego"
+
 type TLS struct {
-	// Mode: off (default) | file | self-signed.
+	// Mode: off (default) | file | self-signed | acme.
 	Mode string `mapstructure:"mode"`
 
 	// file: PEM certificate (with chain) and key, written by any tool (lego,
@@ -72,6 +185,9 @@ type TLS struct {
 
 	// MinVersion: "1.2" (default) or "1.3".
 	MinVersion string `mapstructure:"min_version"`
+
+	// ACME: settings for mode acme.
+	ACME ACME `mapstructure:"acme"`
 }
 
 // Fallback reports whether file mode serves a self-signed certificate while
@@ -175,6 +291,28 @@ func (c *Config) ApplyDefaults() {
 	if s.TLS.MinVersion == "" {
 		s.TLS.MinVersion = "1.2"
 	}
+	if env := s.TLS.ACME.DNSEnv; len(env) > 0 {
+		// Viper lowercases map keys; provider variables are uppercase by convention.
+		up := make(map[string]string, len(env))
+		for k, v := range env {
+			up[strings.ToUpper(k)] = v
+		}
+		s.TLS.ACME.DNSEnv = up
+	}
+	if a := &s.TLS.ACME; s.TLS.Mode == TLSACME {
+		if a.Server == "" {
+			a.Server = "letsencrypt"
+		}
+		if a.KeyType == "" {
+			a.KeyType = "EC256"
+		}
+		if a.Challenge == "" {
+			a.Challenge = ChallengeDNS
+		}
+		if a.CheckInterval == 0 {
+			a.CheckInterval = 12 * time.Hour
+		}
+	}
 	for i := range c.Providers {
 		p := &c.Providers[i]
 		p.BaseURL = strings.TrimRight(p.BaseURL, "/")
@@ -214,8 +352,15 @@ func (c *Config) Validate() error {
 			add("server.tls: mode file needs cert_file and key_file")
 		}
 	case TLSSelfSigned:
+	case TLSACME:
+		for _, e := range t.ACME.validate() {
+			add("server.tls.acme: %s", e)
+		}
+		if t.ACME.Challenge == ChallengeHTTP && t.HTTPListen == "" {
+			add("server.tls.acme: challenge http needs server.tls.http_listen (reachable on port 80)")
+		}
 	default:
-		add("server.tls: unknown mode %q (off|file|self-signed)", t.Mode)
+		add("server.tls: unknown mode %q (off|file|self-signed|acme)", t.Mode)
 	}
 	if t.HTTPListen != "" && !t.Enabled() {
 		add("server.tls: http_listen needs TLS enabled")
@@ -313,6 +458,17 @@ func (c *Config) DecryptSecrets(ci *secrets.Cipher) error {
 			return fmt.Errorf("provider %q: %w", p.Name, err)
 		}
 		p.APIKey = pt
+	}
+	env := c.Server.TLS.ACME.DNSEnv
+	for name, val := range env {
+		if !secrets.IsEncrypted(val) {
+			continue
+		}
+		pt, err := ci.Decrypt(val)
+		if err != nil {
+			return fmt.Errorf("server.tls.acme.dns_env %s: %w", name, err)
+		}
+		env[name] = pt
 	}
 	return nil
 }

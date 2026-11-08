@@ -11,6 +11,8 @@
 //     Until a valid pair exists, a self-signed fallback can be served.
 //   - self-signed: generated on first use, stored in Dir so clients can trust
 //     it, and regenerated before it expires or when the names change.
+//   - acme: like file, with lego's output (ACMEPaths) as the pair and the
+//     fallback always on; see package acme.
 package tlsconf
 
 import (
@@ -85,10 +87,16 @@ func New(cfg config.TLS, baseDir string, log *slog.Logger) (*Manager, error) {
 	m.cfg.KeyFile = resolve(baseDir, cfg.KeyFile)
 	m.dir = Dir(cfg, baseDir)
 
+	if cfg.Mode == config.TLSACME {
+		// lego's output, see ACMEPaths. Fallback is always on: the first issuance
+		// happens after startup.
+		m.cfg.CertFile, m.cfg.KeyFile = ACMEPaths(m.dir)
+	}
+
 	switch cfg.Mode {
-	case config.TLSFile:
+	case config.TLSFile, config.TLSACME:
 		if err := m.loadFile(); err != nil {
-			if !cfg.Fallback() {
+			if cfg.Mode == config.TLSFile && !cfg.Fallback() {
 				return nil, err
 			}
 			log.Warn("TLS certificate not usable yet; serving a self-signed fallback until it is", "err", err)
@@ -124,12 +132,30 @@ func (m *Manager) TLSConfig() *tls.Config {
 // Info describes the certificate being served.
 func (m *Manager) Info() Info { return m.cur.Load().info }
 
-// WatchFiles lists the files whose changes should trigger Reload.
+// WatchFiles lists the files whose changes should trigger Reload. Not in acme
+// mode: the router reloads after each lego run itself (and Check covers the rest).
 func (m *Manager) WatchFiles() []string {
 	if m.cfg.Mode == config.TLSFile {
 		return []string{m.cfg.CertFile, m.cfg.KeyFile}
 	}
 	return nil
+}
+
+func (m *Manager) usesFiles() bool {
+	return m.cfg.Mode == config.TLSFile || m.cfg.Mode == config.TLSACME
+}
+
+// ACMECertName is the --cert.name the router gives lego, so the files have a
+// fixed name whatever the domains (wildcards included).
+const ACMECertName = "simple-router"
+
+// LegoPath is lego's --path (account and certificates) under the TLS dir.
+func LegoPath(tlsDir string) string { return filepath.Join(tlsDir, config.LegoDir) }
+
+// ACMEPaths returns the certificate and key files lego writes.
+func ACMEPaths(tlsDir string) (cert, key string) {
+	d := filepath.Join(LegoPath(tlsDir), "certificates")
+	return filepath.Join(d, ACMECertName+".crt"), filepath.Join(d, ACMECertName+".key")
 }
 
 // Dir returns the certificate directory for cfg (baseDir: the config's directory).
@@ -153,7 +179,7 @@ func (m *Manager) Reload() (bool, error) {
 
 	var err error
 	switch {
-	case m.cfg.Mode == config.TLSFile:
+	case m.usesFiles():
 		err = m.loadFile()
 		if err != nil && m.cur.Load().info.Source == "fallback" {
 			err = errors.Join(err, m.ensureSelfSigned("fallback")) // keep the fallback fresh
