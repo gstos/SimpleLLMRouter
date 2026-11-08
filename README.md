@@ -105,6 +105,7 @@ providers:                         # OpenAI-compatible upstreams
 
 models:
   - name: openai/gpt-4o            # the id clients send
+    aliases: [gpt-4o]              # other ids that route the same way (optional)
     type: chat                     # chat (default) | embedding | rerank | messages (Anthropic)
     targets:
       - {provider: openai, model: gpt-4o, priority: 1}
@@ -131,6 +132,12 @@ probes) get a random id. Clients just use the router's URL and key; nothing else
 simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 \
   --session-header X-Opencode-Session
 ```
+
+**Aliases.** A model's `aliases` are other ids clients may send for it, e.g. `bge-m3` and
+`baai/bge-m3`. They share the model's targets, round robin and sticky sessions: a conversation
+keeps its provider whichever name it uses. A key whose `models` patterns match either the alias or
+the model's name may use the alias. `GET /v1/models` lists aliases as entries of their own. Names
+and aliases must be unique across all models.
 
 The config is validated as a whole: unknown providers, duplicate names, plaintext credentials
 and malformed hashes are reported together, with `simple-router validate`.

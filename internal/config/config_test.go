@@ -104,3 +104,33 @@ func TestSessionHeaderValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestAliasValidation(t *testing.T) {
+	model := func(name string, aliases ...string) Model {
+		return Model{Name: name, Aliases: aliases, Targets: []Target{{Provider: "p", Model: "m"}}}
+	}
+	cases := []struct {
+		models []Model
+		want   string
+	}{
+		{[]Model{model("a", "x", "y"), model("b", "z")}, ""},
+		{[]Model{model("a", "")}, "empty alias"},
+		{[]Model{model("a", "a")}, "own name"},
+		{[]Model{model("a", "x"), model("b", "x")}, "already a model name or alias"},
+		{[]Model{model("a", "b"), model("b")}, "duplicate name"},
+		{[]Model{model("a"), model("b", "a")}, "already a model name or alias"},
+	}
+	for i, c := range cases {
+		cfg := base()
+		cfg.Providers = []Provider{{Name: "p", BaseURL: "https://x.test/v1"}}
+		cfg.Models = c.models
+		cfg.ApplyDefaults()
+		err := cfg.Validate()
+		if c.want == "" && err != nil {
+			t.Errorf("case %d: %v", i, err)
+		}
+		if c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("case %d: %v, want %q", i, err, c.want)
+		}
+	}
+}

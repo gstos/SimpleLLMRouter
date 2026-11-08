@@ -27,11 +27,12 @@ type Target struct {
 
 // Route holds the targets of one public model.
 type Route struct {
-	Name   string
-	Type   string
-	groups [][]*Target
-	rr     []atomic.Uint64
-	byID   map[string]*Target
+	Name    string
+	Aliases []string // other names that resolve to this route
+	Type    string
+	groups  [][]*Target
+	rr      []atomic.Uint64
+	byID    map[string]*Target
 }
 
 type Router struct {
@@ -76,7 +77,7 @@ func New(cfg *config.Config, prev *Router) *Router {
 		}
 	}
 	for _, m := range cfg.Models {
-		rt := &Route{Name: m.Name, Type: m.Type, byID: map[string]*Target{}}
+		rt := &Route{Name: m.Name, Aliases: m.Aliases, Type: m.Type, byID: map[string]*Target{}}
 		byPrio := map[int][]*Target{}
 		for _, t := range m.Targets {
 			tg := &Target{ID: t.Provider + "/" + t.Model, Provider: provs[t.Provider], Model: t.Model, Priority: t.Priority}
@@ -93,19 +94,22 @@ func New(cfg *config.Config, prev *Router) *Router {
 		}
 		rt.rr = make([]atomic.Uint64, len(rt.groups))
 		r.routes[m.Name] = rt
+		for _, a := range m.Aliases {
+			r.routes[a] = rt // same Route: shared round robin and targets
+		}
 		r.names = append(r.names, m.Name)
 	}
 	sort.Strings(r.names)
 	return r
 }
 
-// Route returns the route for a public model name.
+// Route returns the route for a public model name or alias.
 func (r *Router) Route(model string) (*Route, bool) {
 	rt, ok := r.routes[model]
 	return rt, ok
 }
 
-// Models returns all public model names, sorted.
+// Models returns all routes (one per model, aliases included in each), sorted by name.
 func (r *Router) Models() []*Route {
 	out := make([]*Route, 0, len(r.names))
 	for _, n := range r.names {

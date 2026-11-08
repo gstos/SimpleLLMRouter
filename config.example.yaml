@@ -104,6 +104,7 @@ models:
       - { provider: openrouter, model: openai/gpt-4o, priority: 2 }  # fallback
 
   - name: openai/text-embedding-3-small
+    aliases: [text-embedding-3-small]   # other ids clients may send (same routing)
     type: embedding
     targets:
       - { provider: openai, model: text-embedding-3-small, priority: 1 }

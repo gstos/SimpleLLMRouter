@@ -247,8 +247,11 @@ func (c *Config) Provider(name string) *Provider {
 
 type Model struct {
 	// Name is the model id clients send (e.g. "openai/gpt-4o").
-	Name    string   `mapstructure:"name"`
-	Type    string   `mapstructure:"type"`
+	Name string `mapstructure:"name"`
+	Type string `mapstructure:"type"`
+	// Aliases are other ids clients may send for this model (e.g. "baai/bge-m3"
+	// for "bge-m3"): same targets, routing and sticky sessions.
+	Aliases []string `mapstructure:"aliases"`
 	Targets []Target `mapstructure:"targets"`
 }
 
@@ -443,6 +446,17 @@ func (c *Config) Validate() error {
 		case TypeChat, TypeEmbedding, TypeRerank, TypeMessages:
 		default:
 			add("model %q: unknown type %q (chat|embedding|rerank|messages)", m.Name, m.Type)
+		}
+		for _, a := range m.Aliases {
+			switch {
+			case a == "":
+				add("model %q: empty alias", m.Name)
+			case a == m.Name:
+				add("model %q: alias %q is the model's own name", m.Name, a)
+			case models[a]:
+				add("model %q: alias %q is already a model name or alias", m.Name, a)
+			}
+			models[a] = true
 		}
 		if len(m.Targets) == 0 {
 			add("model %q: at least one target is required", m.Name)
