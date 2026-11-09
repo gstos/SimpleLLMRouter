@@ -123,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST "+prefix+"/completions", s.proxy(config.EndpointCompletions, chat))
 		mux.HandleFunc("POST "+prefix+"/embeddings", s.proxy(config.EndpointEmbeddings, []string{config.TypeEmbedding}))
 		mux.HandleFunc("POST "+prefix+"/rerank", s.proxy(config.EndpointRerank, []string{config.TypeRerank}))
+		mux.HandleFunc("POST "+prefix+"/systemone", s.proxy(config.EndpointSystemOne, []string{config.TypeSystemOne}))
 		mux.HandleFunc("GET "+prefix+"/models", s.models)
 		// Anthropic Messages API: same routing, Anthropic error shape.
 		messages := []string{config.TypeMessages}
@@ -367,7 +368,7 @@ var forwardHeaders = []string{"Accept", "HTTP-Referer", "X-Title", "OpenAI-Organ
 // send makes one upstream attempt. session is the conversation id sent in the
 // provider's session_header, if it has one.
 func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, endpoint string, payload []byte, session string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.Provider.BaseURL+t.Provider.Path(endpoint), bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.Provider.URL(endpoint), bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -377,6 +378,10 @@ func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, e
 		}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if (endpoint == config.EndpointMessages || endpoint == config.EndpointCountTokens) && req.Header.Get("Anthropic-Version") == "" {
+		// Anthropic requires it; SDKs send it, hand-written clients may not.
+		req.Header.Set("Anthropic-Version", health.AnthropicVersion)
+	}
 	health.SetAuth(req, t.Provider)
 	if h := t.Provider.SessionHeader; h != "" {
 		if v := in.Header.Get(h); v != "" {
@@ -472,6 +477,9 @@ func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawM
 			}
 		} else if p := body["prompt"]; len(p) > 0 {
 			h := sha256.Sum256(p[:min(len(p), 2048)])
+			session = "p:" + hex.EncodeToString(h[:12])
+		} else if state := body["state"]; len(state) > 0 { // System One: the whole state identifies the request
+			h := sha256.Sum256(state)
 			session = "p:" + hex.EncodeToString(h[:12])
 		}
 	}

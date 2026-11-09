@@ -79,7 +79,7 @@ func (c *Checker) Check(ctx context.Context, p *config.Provider) Result {
 	start := time.Now()
 	res := Result{Provider: p.Name, CheckedAt: start}
 
-	req, err := http.NewRequestWithContext(ctx, p.HealthMethod, p.BaseURL+p.Path(config.EndpointHealth), nil)
+	req, err := http.NewRequestWithContext(ctx, p.HealthMethod, p.URL(config.EndpointHealth), nil)
 	if err == nil {
 		// Anthropic's API requires a version header, even on /models; other
 		// providers ignore it. A provider's own headers override it.
@@ -156,7 +156,8 @@ func SetAuth(req *http.Request, p *config.Provider) {
 	}
 }
 
-// AnthropicVersion is sent on health probes (see Check).
+// AnthropicVersion is sent on health probes (see Check), and on Messages API
+// requests whose client did not send one.
 const AnthropicVersion = "2023-06-01"
 
 // RandomSession returns a random session id (32 hex chars) for requests that

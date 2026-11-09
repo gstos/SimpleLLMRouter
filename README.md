@@ -30,8 +30,8 @@ An OpenRouter-compatible LLM router in Go.
 
 ```sh
 # e.g. macOS on Apple Silicon
-curl -LO https://github.com/gstos/SimpleLLMRouter/releases/download/v0.2.0/simple-router_0.2.0_darwin_arm64.tar.gz
-tar xzf simple-router_0.2.0_darwin_arm64.tar.gz
+curl -LO https://github.com/gstos/SimpleLLMRouter/releases/download/v0.2.1/simple-router_0.2.1_darwin_arm64.tar.gz
+tar xzf simple-router_0.2.1_darwin_arm64.tar.gz
 ./simple-router version
 ```
 
@@ -41,8 +41,8 @@ The macOS binaries aren't signed: if macOS blocks the first run, clear the downl
 **Container image** (`linux/amd64` and `linux/arm64`, so it runs natively on Apple Silicon):
 
 ```sh
-docker pull ghcr.io/gstos/simplellmrouter:0.2.0    # or :latest
-docker pull ghcr.io/gstos/simplellmrouter:0.2.0-acme   # with lego, for TLS mode acme
+docker pull ghcr.io/gstos/simplellmrouter:0.2.1    # or :latest
+docker pull ghcr.io/gstos/simplellmrouter:0.2.1-acme   # with lego, for TLS mode acme
 ```
 
 **From source** (Go 1.27+):
@@ -107,6 +107,7 @@ providers:                         # OpenAI-compatible upstreams
     # auth_scheme: none            # default Bearer; "none" sends the raw key
     # headers: {X-Title: my-app}   # extra headers on every request
     # paths: {rerank: /v2/rerank, health: /models}   # per-endpoint path overrides
+    # base_urls: {rerank: https://api.openai.com/v2} # per-endpoint base URL (same host; see below)
     # session_header: X-Opencode-Session            # send a per-conversation id (see below)
     # auth: managed                # or passthrough: client credentials forwarded (see "Direct provider access")
     # allow_paths: ["/v1/*"]       # limit /provider/openai/... to these paths
@@ -114,7 +115,7 @@ providers:                         # OpenAI-compatible upstreams
 models:
   - name: openai/gpt-4o            # the id clients send
     aliases: [gpt-4o]              # other ids that route the same way (optional)
-    type: chat                     # chat (default) | embedding | rerank | messages (Anthropic)
+    type: chat                     # chat (default) | embedding | rerank | messages (Anthropic) | systemone
     targets:
       - {provider: openai, model: gpt-4o, priority: 1}
       - {provider: azure,  model: gpt-4o, priority: 1}         # same priority: round robin
@@ -127,6 +128,25 @@ api_keys:                          # client keys; only hashes are stored
     admin: true                    # may call /admin endpoints
     providers: ["*"]               # may use /provider/<name>/ for these (default: none)
 ```
+
+**Per-endpoint base URL.** The upstream URL is `base_url` plus the endpoint's path (`paths`, or
+the default: `/chat/completions`, `/embeddings`, `/models` for health...). When one account serves
+APIs under different prefixes (System One on OpenCode Go, a local server with a separate embeddings
+path...), `base_urls` replaces `base_url` for the endpoints it names (`chat`, `completions`,
+`embeddings`, `rerank`, `messages`, `count_tokens`, `systemone`, `health`), so a single provider
+keeps one key, one header set and one health entry instead of a copy per prefix:
+
+```yaml
+  - name: example
+    base_url: https://api.example.com/v1        # chat, completions, health...
+    base_urls:
+      embeddings: https://api.example.com/inference/v1
+    paths: {embeddings: /embed}                 # -> https://api.example.com/inference/v1/embed
+```
+
+Each entry must use the same scheme and host (and port) as `base_url`, so the provider's key never
+goes to another host; use a separate provider for that. Direct access (`/provider/<name>/<path>`)
+always uses `base_url`.
 
 **Session header.** Some providers want an id tying requests to a conversation. OpenCode Go
 (`https://opencode.ai/zen/go/v1`) rejects third-party requests without `X-Opencode-Session`
@@ -198,6 +218,7 @@ or `X-Api-Key`. Errors use OpenRouter's shape: `{"error": {"code": 404, "message
 | GET | `/models` | the models this key can use |
 | POST | `/messages` | `messages` models (Anthropic Messages API); streaming supported |
 | POST | `/messages/count_tokens` | `messages` models |
+| POST | `/systemone` | `systemone` models (System One decisions); see [System One](#system-one-decisions) |
 | GET | `/admin/health[?refresh=1]` | provider health and the served TLS certificate; admin keys; 503 if any provider is down |
 | POST | `/admin/unseal` | `{"master_key"}`; admin key, localhost only |
 | POST | `/admin/rotate-master-key` | `{"master_key", "new_master_key"?}` returns the new key; admin key, localhost only |
@@ -235,12 +256,46 @@ models:
 - Clients authenticate with their router key in `X-Api-Key` (the Anthropic SDKs' default) or
   `Authorization: Bearer`. Point an Anthropic SDK or tool at `http://router:8080` (it adds
   `/v1/messages`). Name the router's models after the ids the client sends.
-- `anthropic-version` and `anthropic-beta` are forwarded. The sticky key includes the top-level
+- `anthropic-version` and `anthropic-beta` are forwarded. A request without `anthropic-version`
+  gets `2023-06-01` (Anthropic rejects requests without one). The sticky key includes the top-level
   `system` prompt. Overloaded (529) and other 5xx responses fail over.
 - The router's own errors use Anthropic's shape (`{"type": "error", "error": {"type":
   "not_found_error", ...}}`); upstream errors are relayed as they are.
 - Health probes send `anthropic-version: 2023-06-01`, which Anthropic requires on `/models` and
   other providers ignore; set it in a provider's `headers` to change it.
+
+### System One (decisions)
+
+`POST /v1/systemone` serves models of `type: systemone`: decision models that answer typed
+questions about a `state` (`{"model", "state", "questions": {...}}` in, `{"answers": {...},
+"usage": {...}}` out), such as OpenCode Go's `jev-*` models or a self-hosted System One server.
+Routing is the same as chat (priorities, round robin, failover including 402 and 429, cooldown,
+sticky routing). The body is forwarded as is with `model` rewritten, and the response is relayed
+unchanged; non-streaming. The sticky key uses `X-Session-Id`, else a hash of `state`.
+
+The upstream URL is `base_url` + `/systemone`. OpenCode Go serves it under another prefix of the
+same host, so one provider, one key, can serve chat and System One with `base_urls`:
+
+```yaml
+providers:
+  - name: opencode-go
+    base_url: https://opencode.ai/zen/go/v1                  # chat, messages, health
+    base_urls:
+      systemone: https://opencode.ai/inference/systemone/v1  # -> .../v1/systemone
+    api_key: enc:v1:...
+    session_header: X-Opencode-Session
+
+models:
+  - name: jev-1.13
+    type: systemone
+    targets:
+      - {provider: opencode-go, model: jev-1.13-free, priority: 1}   # free tier first
+      - {provider: opencode-go, model: jev-1.13,      priority: 2}   # paid fallback
+```
+
+Only the System One format is supported. OpenRouter's alpha decisions API
+(`/api/alpha/decisions`) uses a different format; reach it through
+[direct provider access](#direct-provider-access) instead.
 
 ### Direct provider access
 
@@ -362,9 +417,10 @@ server:
 3. **Sticky routing**: after a success, the conversation is pinned to that target for
    `sticky_ttl`, renewed on each request. A conversation is identified by client key + model +
    session, where the session is the `X-Session-Id` header, else the body's `user` field, else a
-   hash of the messages through the first user message (or the prompt). Follow-ups stay on the
+   hash of the messages through the first user message (for completions, of the prompt's start;
+   for System One, of the whole `state`). Follow-ups stay on the
    same provider, even after a failover, while separate conversations still spread across providers.
-4. Providers that fail the background health check (`GET <base_url>/models`), and targets on
+4. Providers that fail the background health check (`GET <base_url>/models`, or `base_urls.health` and `paths.health` if set), and targets on
    cooldown, go to the back of the list. They are still tried as a last resort.
 
 Upstream redirects are never followed, so provider credentials can't be forwarded to another host:
@@ -578,7 +634,7 @@ Two images are published:
 | Image | Contents |
 |---|---|
 | `ghcr.io/gstos/simplellmrouter:<tag>` | the router only |
-| `ghcr.io/gstos/simplellmrouter:<tag>-acme` (e.g. `latest-acme`, `0.2.0-acme`) | the router plus lego v5, for TLS mode `acme` |
+| `ghcr.io/gstos/simplellmrouter:<tag>-acme` (e.g. `latest-acme`, `0.2.1-acme`) | the router plus lego v5, for TLS mode `acme` |
 
 ```sh
 docker run -d --name router -p 443:8443 \
