@@ -475,22 +475,15 @@ func stickyKey(keyName, model string, r *http.Request, body map[string]json.RawM
 				}
 				session = "p:" + hex.EncodeToString(h.Sum(nil)[:12])
 			}
-		} else if p := firstOf(body, "prompt", "state"); len(p) > 0 { // state: System One
+		} else if p := body["prompt"]; len(p) > 0 {
 			h := sha256.Sum256(p[:min(len(p), 2048)])
+			session = "p:" + hex.EncodeToString(h[:12])
+		} else if state := body["state"]; len(state) > 0 { // System One: the whole state identifies the request
+			h := sha256.Sum256(state)
 			session = "p:" + hex.EncodeToString(h[:12])
 		}
 	}
 	return keyName + "\x00" + model + "\x00" + session, session != ""
-}
-
-// firstOf returns the first non-empty field among names.
-func firstOf(body map[string]json.RawMessage, names ...string) json.RawMessage {
-	for _, n := range names {
-		if v := body[n]; len(v) > 0 {
-			return v
-		}
-	}
-	return nil
 }
 
 // upstreamSession is the id sent in a provider's session_header: a hash of the
