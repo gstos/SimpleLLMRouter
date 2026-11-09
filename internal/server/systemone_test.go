@@ -129,3 +129,21 @@ func TestSystemOneStickyOnState(t *testing.T) {
 		t.Fatal("sticky key not derived from state")
 	}
 }
+
+func TestSystemOneStickyUsesEntireState(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/systemone", nil)
+	key := func(suffix string) string {
+		raw, err := json.Marshal(strings.Repeat("shared context ", 200) + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, _ := stickyKey("k", "jev", r, map[string]json.RawMessage{"state": raw})
+		return k
+	}
+	if key("request one") == key("request two") {
+		t.Fatal("distinct states with the same first 2048 bytes share a sticky key")
+	}
+	if key("request one") != key("request one") {
+		t.Fatal("identical states have different sticky keys")
+	}
+}
