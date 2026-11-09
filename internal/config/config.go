@@ -4,9 +4,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,6 +25,10 @@ const (
 	// providers that speak it. No format conversion: every target must accept
 	// Anthropic requests.
 	TypeMessages = "messages"
+	// TypeSystemOne: System One decision models (/v1/systemone): structured
+	// answers to questions about a "state" (OpenCode Go jev-*, self-hosted).
+	// The body is forwarded as is, with model rewritten.
+	TypeSystemOne = "systemone"
 )
 
 type Config struct {
@@ -224,6 +230,11 @@ type Provider struct {
 	AuthHeader string            `mapstructure:"auth_header"`
 	AuthScheme string            `mapstructure:"auth_scheme"`
 	Headers    map[string]string `mapstructure:"headers"`
+	// BaseURLs overrides base_url per endpoint (same keys as paths), for
+	// providers whose APIs live under different prefixes. Each entry must have
+	// the same scheme and host as base_url, so the provider's key is never sent
+	// to another host. Direct access (/provider/<name>/) always uses base_url.
+	BaseURLs map[string]string `mapstructure:"base_urls"`
 	// Paths overrides the upstream path per endpoint (chat, completions, embeddings, rerank, health).
 	Paths map[string]string `mapstructure:"paths"`
 	// HealthMethod defaults to GET.
@@ -316,6 +327,7 @@ const (
 	EndpointRerank      = "rerank"
 	EndpointMessages    = "messages"
 	EndpointCountTokens = "count_tokens"
+	EndpointSystemOne   = "systemone"
 	EndpointHealth      = "health"
 )
 
@@ -326,7 +338,13 @@ var defaultPaths = map[string]string{
 	EndpointRerank:      "/rerank",
 	EndpointMessages:    "/messages",
 	EndpointCountTokens: "/messages/count_tokens",
+	EndpointSystemOne:   "/systemone",
 	EndpointHealth:      "/models",
+}
+
+// endpointList is the endpoint names, for error messages.
+func endpointList() string {
+	return strings.Join(slices.Sorted(maps.Keys(defaultPaths)), "|")
 }
 
 // Path returns the upstream path for an endpoint.
@@ -335,6 +353,16 @@ func (p Provider) Path(endpoint string) string {
 		return v
 	}
 	return defaultPaths[endpoint]
+}
+
+// URL returns the upstream URL for an endpoint: base_urls[endpoint] (else
+// base_url) plus the endpoint's path.
+func (p Provider) URL(endpoint string) string {
+	base := p.BaseURL
+	if v, ok := p.BaseURLs[endpoint]; ok && v != "" {
+		base = v
+	}
+	return base + p.Path(endpoint)
 }
 
 // ApplyDefaults fills in unset values.
@@ -389,6 +417,9 @@ func (c *Config) ApplyDefaults() {
 	for i := range c.Providers {
 		p := &c.Providers[i]
 		p.BaseURL = strings.TrimRight(p.BaseURL, "/")
+		for k, v := range p.BaseURLs {
+			p.BaseURLs[k] = strings.TrimRight(v, "/")
+		}
 		if p.Auth == "" {
 			p.Auth = AuthManaged
 		}
@@ -469,8 +500,26 @@ func (c *Config) Validate() error {
 			add("provider %q: name must not contain \"/\"", p.Name)
 		}
 		providers[p.Name] = true
-		if u, err := url.Parse(p.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
+		base, err := url.Parse(p.BaseURL)
+		if err != nil || base.Scheme == "" || base.Host == "" {
 			add("provider %q: base_url %q is not an absolute URL", p.Name, p.BaseURL)
+			base = nil
+		}
+		for _, k := range slices.Sorted(maps.Keys(p.BaseURLs)) {
+			v := p.BaseURLs[k]
+			if _, ok := defaultPaths[k]; !ok {
+				add("provider %q: base_urls: unknown endpoint %q (%s)", p.Name, k, endpointList())
+				continue
+			}
+			u, err := url.Parse(v)
+			switch {
+			case err != nil || u.Scheme == "" || u.Host == "":
+				add("provider %q: base_urls.%s %q is not an absolute URL", p.Name, k, v)
+			case u.User != nil || u.RawQuery != "" || u.Fragment != "":
+				add("provider %q: base_urls.%s %q must not contain credentials, a query or a fragment", p.Name, k, v)
+			case base != nil && (!strings.EqualFold(u.Scheme, base.Scheme) || !strings.EqualFold(u.Host, base.Host)):
+				add("provider %q: base_urls.%s %q must use the same scheme and host as base_url (%s://%s)", p.Name, k, v, base.Scheme, base.Host)
+			}
 		}
 		if p.APIKey != "" && !secrets.IsEncrypted(p.APIKey) {
 			add("provider %q: api_key must be encrypted (use `simple-router encrypt`)", p.Name)
@@ -505,9 +554,9 @@ func (c *Config) Validate() error {
 		}
 		models[m.Name] = true
 		switch m.Type {
-		case TypeChat, TypeEmbedding, TypeRerank, TypeMessages:
+		case TypeChat, TypeEmbedding, TypeRerank, TypeMessages, TypeSystemOne:
 		default:
-			add("model %q: unknown type %q (chat|embedding|rerank|messages)", m.Name, m.Type)
+			add("model %q: unknown type %q (chat|embedding|rerank|messages|systemone)", m.Name, m.Type)
 		}
 		for _, a := range m.Aliases {
 			switch {

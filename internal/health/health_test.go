@@ -44,3 +44,17 @@ func TestHealthSendsRandomSession(t *testing.T) {
 		t.Fatalf("probe sessions: %q", seen)
 	}
 }
+
+func TestHealthUsesHealthBaseURL(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { path = r.URL.Path }))
+	defer srv.Close()
+	p := config.Provider{BaseURL: srv.URL + "/zen/v1", BaseURLs: map[string]string{"health": srv.URL + "/inference/v1"}, HealthMethod: "GET", AuthHeader: "Authorization", AuthScheme: "Bearer"}
+	c := New([]config.Provider{p}, time.Second, nil)
+	if res := c.Check(context.Background(), &p); !res.Healthy {
+		t.Fatalf("probe: %+v", res)
+	}
+	if path != "/inference/v1/models" {
+		t.Fatalf("probe path %q", path)
+	}
+}

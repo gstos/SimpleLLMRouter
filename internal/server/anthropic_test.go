@@ -228,3 +228,22 @@ func TestMessagesStreams(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestMessagesDefaultAnthropicVersion(t *testing.T) {
+	h, ups := anthSetup(t, nil)
+	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
+		anthDo(h, path, anthBody, "X-Api-Key", fullKey) // no Anthropic-Version
+		if v := ups["a"].last().header.Get("Anthropic-Version"); v != health.AnthropicVersion {
+			t.Fatalf("%s: default Anthropic-Version %q", path, v)
+		}
+	}
+	anthDo(h, "/v1/messages", anthBody, "X-Api-Key", fullKey, "Anthropic-Version", "2099-01-01")
+	if v := ups["a"].last().header.Get("Anthropic-Version"); v != "2099-01-01" {
+		t.Fatalf("client version overridden: %q", v)
+	}
+	// Not added on OpenAI-format endpoints.
+	anthDo(h, "/v1/chat/completions", `{"model":"gpt","messages":[{"role":"user","content":"x"}]}`, "Authorization", "Bearer "+fullKey)
+	if v := ups["a"].last().header.Get("Anthropic-Version"); v != "" {
+		t.Fatalf("chat got Anthropic-Version %q", v)
+	}
+}

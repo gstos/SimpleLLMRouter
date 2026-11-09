@@ -90,6 +90,8 @@ providers:
     base_url: https://opencode.ai/zen/go/v1
     api_key: enc:v1:REPLACE_ME
     session_header: X-Opencode-Session   # required: a per-conversation id is sent in it
+    base_urls:                           # same host, other prefix: System One (jev-*) models
+      systemone: https://opencode.ai/inference/systemone/v1
   - name: opencode-go-pass   # /provider/opencode-go-pass/<path>, forwarded unchanged with the
     base_url: https://opencode.ai/zen/go/v1    # client's own key; the router checks nothing
     auth: passthrough                          # (trusted networks / server.allow_cidrs)
@@ -100,7 +102,7 @@ providers:
 
 models:
   - name: openai/gpt-4o      # the id clients send
-    type: chat               # chat (default) | embedding | rerank
+    type: chat               # chat (default) | embedding | rerank | messages | systemone
     targets:
       - { provider: openai, model: gpt-4o,        priority: 1 }  # 1 and 1: round robin
       - { provider: azure,  model: gpt-4o,        priority: 1 }
@@ -122,6 +124,12 @@ models:
     type: messages
     targets:
       - { provider: anthropic, model: claude-sonnet-4-5 }
+
+  - name: jev-1.13           # POST /v1/systemone (System One decisions)
+    type: systemone
+    targets:
+      - { provider: opencode-go, model: jev-1.13-free, priority: 1 }  # free tier first
+      - { provider: opencode-go, model: jev-1.13,      priority: 2 }  # paid fallback
 
   - name: local/llama
     targets:
