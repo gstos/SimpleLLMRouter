@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gstos/SimpleLLMRouter/internal/config"
+	"github.com/gstos/SimpleLLMRouter/internal/upstream"
 )
 
 // Result is the outcome of one provider probe.
@@ -29,6 +31,7 @@ type Result struct {
 type Checker struct {
 	providers []config.Provider
 	client    *http.Client
+	clients   map[string]*http.Client // providers with their own CA bundle
 	onResult  func(Result)
 
 	mu   sync.RWMutex
@@ -45,17 +48,19 @@ func New(providers []config.Provider, timeout time.Duration, onResult func(Resul
 			probed = append(probed, p)
 		}
 	}
-	return &Checker{
+	c := &Checker{
 		providers: probed,
-		client: &http.Client{
-			Timeout: timeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return fmt.Errorf("upstream redirects are not allowed")
-			},
-		},
-		onResult: onResult,
-		last:     map[string]Result{},
+		client:    &http.Client{Timeout: timeout, CheckRedirect: upstream.NoRedirects},
+		clients:   map[string]*http.Client{},
+		onResult:  onResult,
+		last:      map[string]Result{},
 	}
+	// A ca_file that can't be read here fails closed (probes report the TLS
+	// error); the server logs it when it builds its own transports.
+	for name, tr := range upstream.Transports(probed, nil) {
+		c.clients[name] = &http.Client{Transport: tr, Timeout: timeout, CheckRedirect: upstream.NoRedirects}
+	}
+	return c
 }
 
 // CheckAll probes every provider concurrently and returns results sorted by name.
@@ -79,8 +84,33 @@ func (c *Checker) Check(ctx context.Context, p *config.Provider) Result {
 	start := time.Now()
 	res := Result{Provider: p.Name, CheckedAt: start}
 
-	req, err := http.NewRequestWithContext(ctx, p.HealthMethod, p.URL(config.EndpointHealth), nil)
-	if err == nil {
+	method, target := p.HealthMethod, p.URL(config.EndpointHealth)
+	if p.Peer {
+		// A peer is probed without credentials, at its liveness endpoint.
+		method, target = http.MethodGet, p.HealthURL()
+	}
+	client := c.client
+	if cl, ok := c.clients[p.Name]; ok {
+		client = cl
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, nil)
+	if err == nil && p.Peer {
+		var resp *http.Response
+		if resp, err = client.Do(req); err == nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+			resp.Body.Close()
+			res.Status = resp.StatusCode
+			state := strings.TrimSpace(string(body))
+			res.Healthy = resp.StatusCode == http.StatusOK && state == "ok"
+			switch {
+			case res.Healthy:
+			case resp.StatusCode == http.StatusOK && state == "sealed":
+				res.Error = "peer is sealed (waiting for its master key)"
+			default:
+				res.Error = fmt.Sprintf("unexpected status %d", resp.StatusCode)
+			}
+		}
+	} else if err == nil {
 		// Anthropic's API requires a version header, even on /models; other
 		// providers ignore it. A provider's own headers override it.
 		req.Header.Set("Anthropic-Version", AnthropicVersion)
@@ -89,7 +119,7 @@ func (c *Checker) Check(ctx context.Context, p *config.Provider) Result {
 			req.Header.Set(p.SessionHeader, RandomSession()) // no conversation to tie a probe to
 		}
 		var resp *http.Response
-		resp, err = c.client.Do(req)
+		resp, err = client.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()

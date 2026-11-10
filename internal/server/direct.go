@@ -139,7 +139,7 @@ func (s *Server) direct(w http.ResponseWriter, r *http.Request) {
 			}
 			// No X-Forwarded-*: the client's address isn't passed on.
 		},
-		Transport:     s.client.Transport,
+		Transport:     s.transport(snap, name),
 		ErrorLog:      slog.NewLogLogger(s.log.Handler(), slog.LevelWarn), // into the JSON log
 		FlushInterval: -1,                                                 // stream SSE as it arrives
 		ModifyResponse: func(resp *http.Response) error {

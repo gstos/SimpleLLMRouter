@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/gstos/SimpleLLMRouter/internal/config"
 	"github.com/gstos/SimpleLLMRouter/internal/health"
 	"github.com/gstos/SimpleLLMRouter/internal/router"
+	"github.com/gstos/SimpleLLMRouter/internal/upstream"
 )
 
 type Server struct {
@@ -60,6 +62,34 @@ type snapshot struct {
 	keys    *auth.Store
 	router  *router.Router
 	checker *health.Checker
+	// clients holds the HTTP clients of providers with their own ca_file,
+	// built when the config is loaded; other providers use Server.client.
+	clients map[string]*http.Client
+}
+
+// httpClient returns the client for a provider.
+func (s *Server) httpClient(snap *snapshot, provider string) *http.Client {
+	if c, ok := snap.clients[provider]; ok {
+		return c
+	}
+	return s.client
+}
+
+// transport returns the round tripper for a provider.
+func (s *Server) transport(snap *snapshot, provider string) http.RoundTripper {
+	return s.httpClient(snap, provider).Transport
+}
+
+// newClients builds the per-provider clients (one per ca_file), not per request.
+func (s *Server) newClients(cfg *config.Config) map[string]*http.Client {
+	out := map[string]*http.Client{}
+	trs := upstream.Transports(cfg.Providers, func(name string, err error) {
+		s.log.Error("provider ca_file unusable; its TLS connections will fail", "provider", name, "err", err)
+	})
+	for name, tr := range trs {
+		out[name] = &http.Client{Transport: tr, CheckRedirect: upstream.NoRedirects}
+	}
+	return out
 }
 
 func (s *snapshot) sealed() bool { return s.router == nil }
@@ -69,10 +99,8 @@ func New(log *slog.Logger, opts Options) *Server {
 	s := &Server{
 		// No client-level timeout: streams can be long. The per-request context bounds it.
 		client: &http.Client{
-			Transport: http.DefaultTransport.(*http.Transport).Clone(),
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return errors.New("upstream redirects are not allowed")
-			},
+			Transport:     http.DefaultTransport.(*http.Transport).Clone(),
+			CheckRedirect: upstream.NoRedirects,
 		},
 		log:   log,
 		opts:  opts,
@@ -85,14 +113,14 @@ func New(log *slog.Logger, opts Options) *Server {
 // Update atomically switches to a new, decrypted config (startup, reload, unseal).
 func (s *Server) Update(cfg *config.Config, rt *router.Router, checker *health.Checker) {
 	s.setAllow(cfg)
-	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys), router: rt, checker: checker})
+	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys), router: rt, checker: checker, clients: s.newClients(cfg)})
 }
 
 // Seal serves cfg's client keys without credentials: API calls get 503 until a
 // master key arrives via /admin/unseal.
 func (s *Server) Seal(cfg *config.Config) {
 	s.setAllow(cfg)
-	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys)})
+	s.cur.Store(&snapshot{cfg: cfg, keys: auth.NewStore(cfg.APIKeys), clients: s.newClients(cfg)})
 }
 
 // setAllow compiles the client allowlist of cfg. A config that fails to parse
@@ -314,6 +342,16 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 		sticky, conversation := stickyKey(key.Name, rt.Name, r, body)
 		session := upstreamSession(sticky, conversation)
 		plan := snap.router.Plan(rt, sticky)
+		if r.Header.Get(HopHeader) != "" {
+			// Another router already forwarded this request: one hop only. Serve
+			// it from local targets, so it never loops and never reaches
+			// external providers (their cost is the sender's to decide).
+			plan = slices.DeleteFunc(plan, func(t *router.Target) bool { return !t.Provider.Local() })
+			if len(plan) == 0 {
+				writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("no local target for model %q", model))
+				return
+			}
+		}
 		var lastErr string
 		var lastResp *capturedResponse
 
@@ -322,7 +360,7 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 			payload, _ := json.Marshal(body)
 
 			start := time.Now()
-			resp, err := s.send(ctx, r, t, endpoint, payload, session)
+			resp, err := s.send(ctx, snap, r, t, endpoint, payload, session)
 			attempt := s.log.With("key", key.Name, "model", model, "target", t.ID, "attempt", i+1)
 
 			if err != nil {
@@ -362,12 +400,15 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 	}
 }
 
+// HopHeader marks a request forwarded by a router to a peer router.
+const HopHeader = "X-Router-Hop"
+
 // forwardHeaders are client headers passed through to providers.
 var forwardHeaders = []string{"Accept", "HTTP-Referer", "X-Title", "OpenAI-Organization", "Anthropic-Version", "Anthropic-Beta"}
 
 // send makes one upstream attempt. session is the conversation id sent in the
 // provider's session_header, if it has one.
-func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, endpoint string, payload []byte, session string) (*http.Response, error) {
+func (s *Server) send(ctx context.Context, snap *snapshot, in *http.Request, t *router.Target, endpoint string, payload []byte, session string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.Provider.URL(endpoint), bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -382,6 +423,19 @@ func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, e
 		// Anthropic requires it; SDKs send it, hand-written clients may not.
 		req.Header.Set("Anthropic-Version", health.AnthropicVersion)
 	}
+	if t.Provider.Peer {
+		// Another router: the client's own credentials, as received (the peer
+		// checks them against its keys), the session for sticky routing there,
+		// and the hop marker so the peer serves it from local targets only.
+		for _, h := range []string{"Authorization", "X-Api-Key", "X-Session-Id"} {
+			if v := in.Header.Get(h); v != "" {
+				req.Header.Set(h, v)
+			}
+		}
+		req.Header.Set(HopHeader, "1")
+	}
+	// A peer has no stored key: this applies its static headers only. Client
+	// credentials are never sent to any other provider.
 	health.SetAuth(req, t.Provider)
 	if h := t.Provider.SessionHeader; h != "" {
 		if v := in.Header.Get(h); v != "" {
@@ -389,7 +443,7 @@ func (s *Server) send(ctx context.Context, in *http.Request, t *router.Target, e
 		}
 		req.Header.Set(h, session)
 	}
-	return s.client.Do(req)
+	return s.httpClient(snap, t.Provider.Name).Do(req)
 }
 
 var hopHeaders = map[string]bool{
@@ -407,6 +461,15 @@ func (s *Server) relay(w http.ResponseWriter, resp *http.Response, t *router.Tar
 		}
 		for _, v := range vs {
 			w.Header().Add(k, v)
+		}
+	}
+	if t.Provider.Peer {
+		// What the peer decided is kept under another name; ours is the peer.
+		if v := resp.Header.Get("X-Router-Provider"); v != "" {
+			w.Header().Set("X-Router-Peer-Provider", v)
+		}
+		if v := resp.Header.Get("X-Router-Upstream-Model"); v != "" {
+			w.Header().Set("X-Router-Peer-Model", v)
 		}
 	}
 	w.Header().Set("X-Router-Provider", t.Provider.Name)
