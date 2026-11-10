@@ -199,6 +199,27 @@ func (snap *snapshot) authenticate(w http.ResponseWriter, r *http.Request) *auth
 	return k
 }
 
+// presentedKeys returns the router keys carried in Authorization (Bearer) and
+// X-Api-Key. Missing or non-router tokens (e.g. a provider's own key on a
+// passthrough request) are ignored, so passthrough clients aren't challenged.
+func (snap *snapshot) presentedKeys(r *http.Request) []*auth.Key {
+	var out []*auth.Key
+	seen := map[string]bool{}
+	for _, token := range []string{
+		strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")),
+		r.Header.Get("X-Api-Key"),
+	} {
+		if token == "" || seen[token] {
+			continue
+		}
+		seen[token] = true
+		if k := snap.keys.Lookup(token); k != nil {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // ready is authenticate plus a 503 while sealed.
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) (*snapshot, *auth.Key) {
 	snap, key := s.authenticate(w, r)
@@ -597,6 +618,9 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	}
 	data := []modelEntry{}
 	for _, rt := range snap.router.Models() {
+		if key.DisableExternal && !rt.Serves(func(t *router.Target) bool { return !t.Provider.External }) {
+			continue // only external targets: this key would get 503 (aliases drop with it)
+		}
 		for _, name := range append([]string{rt.Name}, rt.Aliases...) {
 			if key.Allows(rt.Name) {
 				data = append(data, modelEntry{ID: name, Object: "model", Type: rt.Type, OwnedBy: "simple-router"})

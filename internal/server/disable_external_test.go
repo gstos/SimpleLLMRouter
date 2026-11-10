@@ -105,3 +105,64 @@ func TestDisableExternalKeyDirectAccess(t *testing.T) {
 		t.Fatalf("open key on external provider: %d", w.Code)
 	}
 }
+
+// Passthrough checks nothing, but a disable_external key presented in either
+// header still never reaches an external provider; other credentials pass.
+func TestDisableExternalKeyPassthroughTunnel(t *testing.T) {
+	ext := okUpstream(t, "ext")
+	h := noExternalHandler(t,
+		[]config.Provider{{Name: "oc", BaseURL: ext.srv.URL + "/v1", Auth: config.AuthPassthrough, External: true}},
+		[]config.Model{},
+	)
+	send := func(hdr ...string) int {
+		r := httptest.NewRequest("POST", "/provider/oc/chat/completions", strings.NewReader(`{"x":1}`))
+		for i := 0; i+1 < len(hdr); i += 2 {
+			r.Header.Set(hdr[i], hdr[i+1])
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	for name, hdr := range map[string][]string{
+		"authorization": {"Authorization", "Bearer " + privateKey, "X-Api-Key", "sk-provider"},
+		"x-api-key":     {"Authorization", "Bearer sk-provider", "X-Api-Key", privateKey},
+	} {
+		if code := send(hdr...); code != 404 {
+			t.Errorf("%s: private key through passthrough: %d", name, code)
+		}
+	}
+	if ext.n() != 0 {
+		t.Fatalf("external passthrough provider got %d requests", ext.n())
+	}
+	if code := send("Authorization", "Bearer sk-provider"); code != 200 || ext.n() != 1 {
+		t.Fatalf("provider credential through passthrough: %d", code)
+	}
+	if code := send("Authorization", "Bearer "+openKey); code != 200 {
+		t.Fatalf("other router key through passthrough: %d", code)
+	}
+}
+
+func TestDisableExternalKeyModelList(t *testing.T) {
+	ext, local := okUpstream(t, "ext"), okUpstream(t, "local")
+	h := noExternalHandler(t,
+		[]config.Provider{
+			{Name: "or", BaseURL: ext.srv.URL + "/v1", External: true},
+			{Name: "router-b", BaseURL: local.srv.URL + "/v1", Peer: true},
+		},
+		[]config.Model{
+			{Name: "cloud", Aliases: []string{"cloud-alias"}, Targets: []config.Target{{Provider: "or"}}},
+			{Name: "shared", Targets: []config.Target{{Provider: "or", Priority: 1}, {Provider: "router-b", Priority: 2}}},
+		},
+	)
+	list := func(key string) string { return keyPost(h, key, "GET", "/v1/models", "").Body.String() }
+	priv, open := list(privateKey), list(openKey)
+	if strings.Contains(priv, `"cloud"`) || strings.Contains(priv, "cloud-alias") || !strings.Contains(priv, `"shared"`) {
+		t.Errorf("private key list: %s", priv)
+	}
+	if !strings.Contains(open, `"cloud"`) || !strings.Contains(open, "cloud-alias") {
+		t.Errorf("open key list: %s", open)
+	}
+	if ext.n()+local.n() != 0 {
+		t.Fatal("listing models contacted a provider")
+	}
+}

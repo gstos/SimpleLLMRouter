@@ -35,6 +35,17 @@ type Route struct {
 	byID    map[string]*Target
 }
 
+// Serves reports whether any target satisfies keep. It does not advance
+// round robin or consult health.
+func (rt *Route) Serves(keep func(*Target) bool) bool {
+	for _, t := range rt.byID {
+		if keep(t) {
+			return true
+		}
+	}
+	return false
+}
+
 type Router struct {
 	routes   map[string]*Route
 	names    []string

@@ -497,7 +497,9 @@ A provider is **local** unless marked `external: true` (a paid or remote API) or
 - Peers are still used: a forwarded request carries the hop header, so the peer serves it from
   its own local targets only, whatever its config says about the key.
 - `/provider/<name>/` refuses external providers for the key (404, like a provider it isn't
-  granted).
+  granted), including `auth: passthrough` ones: if this key is in `Authorization` or `X-Api-Key`,
+  nothing is forwarded. Other credentials still pass through untouched.
+- `GET /v1/models` leaves out models whose only targets are external (and their aliases).
 
 Privacy here depends on providers being marked: a provider without `external: true` counts as
 local, so mark every remote or paid API.
