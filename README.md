@@ -735,7 +735,7 @@ for the lego image (`--build-arg VERSION=...` stamps a version, `--build-arg LEG
   wildcard and an encrypted credential on a sealed start, against
   [Pebble](https://github.com/letsencrypt/pebble)); then both multi-arch images (`linux/amd64`,
   `linux/arm64`). Pushes to `main` and `v*` tags publish them to `ghcr.io/gstos/simplellmrouter` as
-  `latest`, `main`, `sha-…`, and `0.2.0`/`0.2` for tags, each also with an `-acme` suffix. Pull
+  `latest`, `main`, `sha-…`, and `0.3.0`/`0.3` for tags, each also with an `-acme` suffix. Pull
   requests build without publishing.
 - **`.github/workflows/release.yml`**, when a GitHub release is published: runs the tests, then
   [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) attaches archives for
