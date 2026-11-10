@@ -343,11 +343,11 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 		session := upstreamSession(sticky, conversation)
 		plan := snap.router.Plan(rt, sticky)
 		hop := r.Header.Get(HopHeader) != ""
-		if hop || key.LocalOnly {
+		if hop || key.DisableExternal {
 			// hop: another router already forwarded this request: one hop only.
 			// Serve it from local targets, so it never loops and never reaches
 			// external providers (their cost is the sender's to decide).
-			// LocalOnly key: requests stay private, off external providers;
+			// DisableExternal key: requests stay private, off external providers;
 			// peers are allowed (they serve hop requests locally).
 			plan = slices.DeleteFunc(plan, func(t *router.Target) bool {
 				return t.Provider.External || (hop && t.Provider.Peer)

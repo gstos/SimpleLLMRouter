@@ -24,13 +24,13 @@ func okUpstream(t *testing.T, name string) *anthUpstream {
 	})
 }
 
-func localOnlyHandler(t *testing.T, provs []config.Provider, models []config.Model) http.Handler {
+func noExternalHandler(t *testing.T, provs []config.Provider, models []config.Model) http.Handler {
 	t.Helper()
 	cfg := &config.Config{
 		Providers: provs,
 		Models:    models,
 		APIKeys: []config.APIKey{
-			{Name: "private", Hash: auth.Hash(privateKey), Providers: []string{"*"}, LocalOnly: true},
+			{Name: "private", Hash: auth.Hash(privateKey), Providers: []string{"*"}, DisableExternal: true},
 			{Name: "open", Hash: auth.Hash(openKey), Providers: []string{"*"}},
 		},
 	}
@@ -51,12 +51,12 @@ func keyPost(h http.Handler, key, method, path, body string) *httptest.ResponseR
 	return w
 }
 
-// External first, then a peer, then local: a local-only key skips the
+// External first, then a peer, then local: a key with disable_external skips the
 // external provider (even when it is first and healthy), and may use peers.
-func TestLocalOnlyKeySkipsExternal(t *testing.T) {
+func TestDisableExternalKeySkipsExternal(t *testing.T) {
 	ext, peer, local := okUpstream(t, "ext"), okUpstream(t, "peer"), okUpstream(t, "local")
 	peer.fail.Store(503)
-	h := localOnlyHandler(t,
+	h := noExternalHandler(t,
 		[]config.Provider{
 			{Name: "or", BaseURL: ext.srv.URL + "/v1", External: true},
 			{Name: "router-b", BaseURL: peer.srv.URL + "/v1", Peer: true},
@@ -86,9 +86,9 @@ func TestLocalOnlyKeySkipsExternal(t *testing.T) {
 	}
 }
 
-func TestLocalOnlyKeyDirectAccess(t *testing.T) {
+func TestDisableExternalKeyDirectAccess(t *testing.T) {
 	ext, local := okUpstream(t, "ext"), okUpstream(t, "local")
-	h := localOnlyHandler(t,
+	h := noExternalHandler(t,
 		[]config.Provider{
 			{Name: "or", BaseURL: ext.srv.URL + "/v1", External: true},
 			{Name: "cpu", BaseURL: local.srv.URL + "/v1"},

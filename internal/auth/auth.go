@@ -20,8 +20,8 @@ type Key struct {
 	Admin     bool
 	models    []string // nil => all models
 	providers []string // /provider/<name>/ access; nil => none
-	// LocalOnly: never route this key's requests to external providers.
-	LocalOnly bool
+	// DisableExternal: never route this key's requests to external providers.
+	DisableExternal bool
 }
 
 // AllowsProvider reports whether the key may reach provider directly at
@@ -60,7 +60,7 @@ func NewStore(keys []config.APIKey) *Store {
 		if err != nil || len(raw) != 32 {
 			continue // rejected by config validation
 		}
-		key := &Key{Name: k.Name, Admin: k.Admin, providers: k.Providers, LocalOnly: k.LocalOnly}
+		key := &Key{Name: k.Name, Admin: k.Admin, providers: k.Providers, DisableExternal: k.DisableExternal}
 		for _, m := range k.Models {
 			if m == "*" {
 				key.models = nil

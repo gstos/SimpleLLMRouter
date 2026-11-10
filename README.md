@@ -130,7 +130,7 @@ api_keys:                          # client keys; only hashes are stored
     models: ["*"]                  # glob patterns; ["*"] or empty = all models
     admin: true                    # may call /admin endpoints
     providers: ["*"]               # may use /provider/<name>/ for these (default: none)
-    # local_only: true             # never sent to external providers (see "Private keys")
+    # disable_external: true       # never sent to external providers (see "Private keys")
 ```
 
 **Per-endpoint base URL.** The upstream URL is `base_url` plus the endpoint's path (`paths`, or
@@ -186,7 +186,7 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 | `init [--listen ADDR] [--no-tls]` | First use: creates the master key file (0600), a starter config with `master_key_check` and HTTPS with a self-signed certificate (`--no-tls`: plain HTTP), and an `admin` client key (printed once). Never overwrites. |
 | `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S] [--session-header H] [--auth managed\|passthrough] [--external] [--peer] [--ca-file PEM]` | Encrypts the provider key with the master key and adds the provider. `--peer` takes no key and refuses `--api-key`, `--auth-*`, `--external` and `--auth passthrough`. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
-| `key add <name> [--models a,b*] [--admin] [--providers p,q*] [--local-only]` | Generates a client key, stores only its hash, prints the key once. Default access: all models, no `/provider/` access. |
+| `key add <name> [--models a,b*] [--admin] [--providers p,q*] [--disable-external]` | Generates a client key, stores only its hash, prints the key once. Default access: all models, no `/provider/` access. |
 | `key list` / `key remove <name>` | Names and access only; keys can't be recovered. |
 | `rotate master-key [--out FILE] [--api [--ca-file F] [--insecure]]` | New master key; every provider credential is re-encrypted. See [Rotation](#rotation). |
 | `rotate key <name>` | New client key with the same access; the old one stops working. |
@@ -489,8 +489,8 @@ A provider is **local** unless marked `external: true` (a paid or remote API) or
 (another router). Priorities decide the order per model, whatever the kind: for example local GPU
 (1), external (2), peer (3).
 
-**Private keys.** A key with `local_only: true` (`key add --local-only`) keeps its requests off
-external providers, so prompts stay on your machines:
+**Private keys.** A key with `disable_external: true` (`key add --disable-external`; default
+`false`) keeps its requests off external providers, so prompts stay on your machines:
 
 - Model requests skip `external: true` targets, wherever they sit in the order. If a model has
   only external targets, the answer is 503 and nothing is sent.

@@ -109,8 +109,8 @@ type APIKey struct {
 	Admin  bool     `yaml:"admin,omitempty"`
 	// Providers: /provider/<name>/ access (see config.APIKey.Providers).
 	Providers []string `yaml:"providers,flow,omitempty"`
-	// LocalOnly: see config.APIKey.LocalOnly.
-	LocalOnly bool `yaml:"local_only,omitempty"`
+	// DisableExternal: see config.APIKey.DisableExternal.
+	DisableExternal bool `yaml:"disable_external,omitempty"`
 }
 
 // Entry is a list item summary for `list` commands.
