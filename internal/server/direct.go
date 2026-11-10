@@ -48,7 +48,7 @@ func (s *Server) direct(w http.ResponseWriter, r *http.Request) {
 		if key == nil {
 			return
 		}
-		if p == nil || !key.AllowsProvider(name) {
+		if p == nil || !key.AllowsProvider(name) || (key.LocalOnly && p.External) {
 			writeError(w, http.StatusNotFound, "provider "+strconv.Quote(name)+" not found")
 			return
 		}

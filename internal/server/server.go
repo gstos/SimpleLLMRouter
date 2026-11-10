@@ -342,11 +342,16 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 		sticky, conversation := stickyKey(key.Name, rt.Name, r, body)
 		session := upstreamSession(sticky, conversation)
 		plan := snap.router.Plan(rt, sticky)
-		if r.Header.Get(HopHeader) != "" {
-			// Another router already forwarded this request: one hop only. Serve
-			// it from local targets, so it never loops and never reaches
+		hop := r.Header.Get(HopHeader) != ""
+		if hop || key.LocalOnly {
+			// hop: another router already forwarded this request: one hop only.
+			// Serve it from local targets, so it never loops and never reaches
 			// external providers (their cost is the sender's to decide).
-			plan = slices.DeleteFunc(plan, func(t *router.Target) bool { return !t.Provider.Local() })
+			// LocalOnly key: requests stay private, off external providers;
+			// peers are allowed (they serve hop requests locally).
+			plan = slices.DeleteFunc(plan, func(t *router.Target) bool {
+				return t.Provider.External || (hop && t.Provider.Peer)
+			})
 			if len(plan) == 0 {
 				writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("no local target for model %q", model))
 				return

@@ -32,6 +32,7 @@ var (
 	keyModels []string
 	keyAdmin  bool
 	keyProvs  []string
+	keyLocal  bool
 )
 
 var keyAddCmd = &cobra.Command{
@@ -56,7 +57,7 @@ var keyAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if err := f.AddAPIKey(configfile.APIKey{Name: args[0], Hash: auth.Hash(key), Models: models, Admin: keyAdmin, Providers: keyProvs}); err != nil {
+		if err := f.AddAPIKey(configfile.APIKey{Name: args[0], Hash: auth.Hash(key), Models: models, Admin: keyAdmin, Providers: keyProvs, LocalOnly: keyLocal}); err != nil {
 			return err
 		}
 		if err := f.Save(); err != nil {
@@ -83,7 +84,7 @@ var keyListCmd = &cobra.Command{
 			return err
 		}
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tADMIN\tMODELS\tPROVIDERS")
+		fmt.Fprintln(tw, "NAME\tADMIN\tLOCAL ONLY\tMODELS\tPROVIDERS")
 		for _, k := range keys {
 			models := fmt.Sprint(k["models"])
 			if k["models"] == nil {
@@ -93,7 +94,7 @@ var keyListCmd = &cobra.Command{
 			if k["providers"] != nil {
 				provs = fmt.Sprint(k["providers"])
 			}
-			fmt.Fprintf(tw, "%v\t%v\t%s\t%s\n", k["name"], k["admin"] == true, models, provs)
+			fmt.Fprintf(tw, "%v\t%v\t%v\t%s\t%s\n", k["name"], k["admin"] == true, k["local_only"] == true, models, provs)
 		}
 		return tw.Flush()
 	},
@@ -402,6 +403,7 @@ func readSecret(in io.Reader, prompt string) (string, error) {
 func init() {
 	keyAddCmd.Flags().StringSliceVar(&keyModels, "models", nil, "models the key may use, comma separated; globs allowed (default: all)")
 	keyAddCmd.Flags().BoolVar(&keyAdmin, "admin", false, "allow the key to call /admin endpoints")
+	keyAddCmd.Flags().BoolVar(&keyLocal, "local-only", false, "never route the key's requests to external providers")
 	keyAddCmd.Flags().StringSliceVar(&keyProvs, "providers", nil, "providers the key may reach directly at /provider/<name>/, comma separated; globs allowed (default: none)")
 	keyCmd.AddCommand(keyAddCmd, keyListCmd, keyRemoveCmd)
 

@@ -150,3 +150,6 @@ api_keys:
   - name: rag-service
     hash: sha256:REPLACE_WITH_64_HEX_CHARS_FROM_simple-router_apikey_000000000000000
     models: ["openai/text-embedding-*", "cohere/*"]   # glob patterns
+  - name: private-notes
+    hash: sha256:REPLACE_WITH_64_HEX_CHARS_FROM_simple-router_apikey_000000000000000
+    local_only: true         # never sent to external providers (peers serve it locally)
