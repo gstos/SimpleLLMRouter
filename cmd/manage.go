@@ -123,6 +123,9 @@ var (
 	provAuthScheme string
 	provSessionHdr string
 	provAuth       string
+	provExternal   bool
+	provPeer       bool
+	provCAFile     string
 )
 
 var providerAddCmd = &cobra.Command{
@@ -138,6 +141,9 @@ var providerAddCmd = &cobra.Command{
 		"  simple-router provider add vllm --base-url http://localhost:8000/v1 --no-auth\n" +
 		"  simple-router provider add opencode-go --base-url https://opencode.ai/zen/go/v1 \\\n" +
 		"      --auth passthrough --session-header X-Opencode-Session\n\n" +
+		"  simple-router provider add router-b --base-url https://router-b.lan:8443/v1 --peer \\\n" +
+		"      --ca-file /etc/sr/router-b.pem\n" +
+		"  simple-router provider add openrouter --base-url https://openrouter.ai/api/v1 --external\n\n" +
 		"Other settings (headers, paths, health_method) can be edited in the YAML afterwards.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -166,6 +172,21 @@ var providerAddCmd = &cobra.Command{
 			AuthScheme:    provAuthScheme,
 			SessionHeader: provSessionHdr,
 			Auth:          provAuth,
+			External:      provExternal,
+			Peer:          provPeer,
+			CAFile:        provCAFile,
+		}
+		if provPeer {
+			// The client's own credentials are forwarded: no stored key.
+			if provAPIKey != "" || provAuthHeader != "" || provAuthScheme != "" || provExternal || provAuth == config.AuthPassthrough {
+				return errors.New("--peer doesn't combine with --api-key, --auth-header, --auth-scheme, --external or --auth passthrough")
+			}
+			provNoAuth = true
+		}
+		if provCAFile != "" {
+			if _, err := config.LoadCAPool(provCAFile); err != nil {
+				return fmt.Errorf("--ca-file: %w", err)
+			}
 		}
 		if provAuth != "" && provAuth != config.AuthManaged && provAuth != config.AuthPassthrough {
 			return fmt.Errorf("--auth must be %s or %s", config.AuthManaged, config.AuthPassthrough)
@@ -228,7 +249,7 @@ var providerListCmd = &cobra.Command{
 			return err
 		}
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tBASE URL\tAUTH")
+		fmt.Fprintln(tw, "NAME\tBASE URL\tAUTH\tFLAGS")
 		for _, p := range provs {
 			authDesc := "none"
 			if k, _ := p["api_key"].(string); k != "" {
@@ -237,7 +258,18 @@ var providerListCmd = &cobra.Command{
 					authDesc = "PLAINTEXT (re-add with `provider add`)"
 				}
 			}
-			fmt.Fprintf(tw, "%v\t%v\t%s\n", p["name"], p["base_url"], authDesc)
+			var flags []string
+			if b, _ := p["peer"].(bool); b {
+				flags = append(flags, "peer")
+				authDesc = "client's"
+			}
+			if b, _ := p["external"].(bool); b {
+				flags = append(flags, "external")
+			}
+			if c, _ := p["ca_file"].(string); c != "" {
+				flags = append(flags, "ca_file")
+			}
+			fmt.Fprintf(tw, "%v\t%v\t%s\t%s\n", p["name"], p["base_url"], authDesc, strings.Join(flags, ","))
 		}
 		return tw.Flush()
 	},
@@ -381,6 +413,9 @@ func init() {
 	f.StringVar(&provAuthScheme, "auth-scheme", "", "prefix before the key (default Bearer; \"none\" sends the raw key)")
 	f.StringVar(&provAuth, "auth", "", "managed (default: clients use router keys, the router sends this provider's key) or passthrough (clients' own credentials forwarded unchecked, only at /provider/<name>/)")
 	f.StringVar(&provSessionHdr, "session-header", "", "send a per-conversation id in this header (e.g. X-Opencode-Session for OpenCode Go)")
+	f.BoolVar(&provExternal, "external", false, "provider outside this deployment (paid or remote API); skipped for requests forwarded by a peer router")
+	f.BoolVar(&provPeer, "peer", false, "another simple-router: the client's credentials are forwarded, no API key (one hop, local targets only)")
+	f.StringVar(&provCAFile, "ca-file", "", "PEM bundle trusted (only it) for this provider's HTTPS, e.g. a peer's self-signed certificate")
 	_ = providerAddCmd.MarkFlagRequired("base-url")
 	providerCmd.AddCommand(providerAddCmd, providerListCmd, providerRemoveCmd)
 }

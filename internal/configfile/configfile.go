@@ -96,6 +96,9 @@ type Provider struct {
 	// SessionHeader: see config.Provider.SessionHeader.
 	SessionHeader string `yaml:"session_header,omitempty"`
 	Auth          string `yaml:"auth,omitempty"`
+	External      bool   `yaml:"external,omitempty"`
+	Peer          bool   `yaml:"peer,omitempty"`
+	CAFile        string `yaml:"ca_file,omitempty"`
 }
 
 // APIKey is a client key entry.
