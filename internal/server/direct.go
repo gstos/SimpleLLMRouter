@@ -41,6 +41,17 @@ func (s *Server) direct(w http.ResponseWriter, r *http.Request) {
 	snap := s.cur.Load()
 	p := snap.cfg.Provider(name)
 	keyName := ""
+	if p != nil && p.External {
+		// A disable_external key never reaches an external provider, not even
+		// through a passthrough tunnel that otherwise checks nothing. Same 404
+		// as unknown, so keys can't enumerate providers.
+		for _, k := range snap.presentedKeys(r) {
+			if k.DisableExternal {
+				writeError(w, http.StatusNotFound, "provider "+strconv.Quote(name)+" not found")
+				return
+			}
+		}
+	}
 	if p == nil || p.Auth != config.AuthPassthrough {
 		// Authenticate before saying whether the provider exists, and answer
 		// unknown and not granted alike, so keys can't enumerate providers.

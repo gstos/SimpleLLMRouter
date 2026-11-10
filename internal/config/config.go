@@ -360,6 +360,11 @@ type APIKey struct {
 	// Providers the key may reach directly at /provider/<name>/ (auth: managed
 	// providers; glob patterns allowed, "*" = all). Empty means none.
 	Providers []string `mapstructure:"providers"`
+	// DisableExternal keeps the key's requests off external providers: model
+	// requests skip external targets (peers stay allowed: they serve forwarded
+	// requests from their local targets only) and /provider/<name>/ refuses
+	// external providers.
+	DisableExternal bool `mapstructure:"disable_external"`
 }
 
 // Endpoint names used for path lookup.
