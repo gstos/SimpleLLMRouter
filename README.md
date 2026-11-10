@@ -30,8 +30,8 @@ An OpenRouter-compatible LLM router in Go.
 
 ```sh
 # e.g. macOS on Apple Silicon
-curl -LO https://github.com/gstos/SimpleLLMRouter/releases/download/v0.2.1/simple-router_0.2.1_darwin_arm64.tar.gz
-tar xzf simple-router_0.2.1_darwin_arm64.tar.gz
+curl -LO https://github.com/gstos/SimpleLLMRouter/releases/download/v0.3.0/simple-router_0.3.0_darwin_arm64.tar.gz
+tar xzf simple-router_0.3.0_darwin_arm64.tar.gz
 ./simple-router version
 ```
 
@@ -41,8 +41,8 @@ The macOS binaries aren't signed: if macOS blocks the first run, clear the downl
 **Container image** (`linux/amd64` and `linux/arm64`, so it runs natively on Apple Silicon):
 
 ```sh
-docker pull ghcr.io/gstos/simplellmrouter:0.2.1    # or :latest
-docker pull ghcr.io/gstos/simplellmrouter:0.2.1-acme   # with lego, for TLS mode acme
+docker pull ghcr.io/gstos/simplellmrouter:0.3.0    # or :latest
+docker pull ghcr.io/gstos/simplellmrouter:0.3.0-acme   # with lego, for TLS mode acme
 ```
 
 **From source** (Go 1.27+):
@@ -715,7 +715,7 @@ Two images are published:
 | Image | Contents |
 |---|---|
 | `ghcr.io/gstos/simplellmrouter:<tag>` | the router only |
-| `ghcr.io/gstos/simplellmrouter:<tag>-acme` (e.g. `latest-acme`, `0.2.1-acme`) | the router plus lego v5, for TLS mode `acme` |
+| `ghcr.io/gstos/simplellmrouter:<tag>-acme` (e.g. `latest-acme`, `0.3.0-acme`) | the router plus lego v5, for TLS mode `acme` |
 
 ```sh
 docker run -d --name router -p 443:8443 \
