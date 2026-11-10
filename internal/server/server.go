@@ -379,7 +379,9 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 			if retryable(resp.StatusCode) {
 				cr := capture(resp)
 				attempt.Warn("upstream failed, trying next", "status", resp.StatusCode, "elapsed", time.Since(start))
-				snap.router.Failure(t)
+				if !clientRefusal(t, resp.StatusCode) {
+					snap.router.Failure(t)
+				}
 				lastResp, lastErr = cr, fmt.Sprintf("upstream status %d", resp.StatusCode)
 				continue
 			}
@@ -398,6 +400,21 @@ func (s *Server) proxy(endpoint string, types []string) http.HandlerFunc {
 		}
 		writeError(w, http.StatusBadGateway, "all providers failed: "+lastErr)
 	}
+}
+
+// clientRefusal reports whether a failed status is about this client rather
+// than the target: a peer checks the client's own key, so its 401/403/404 (key
+// unknown there, or model not granted) fail over without putting the peer on
+// cooldown for every other client.
+func clientRefusal(t *router.Target, status int) bool {
+	if !t.Provider.Peer {
+		return false
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	}
+	return false
 }
 
 // HopHeader marks a request forwarded by a router to a peer router.

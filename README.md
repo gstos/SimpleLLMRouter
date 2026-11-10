@@ -402,8 +402,10 @@ models:
   `auth_scheme`, `external: true` and `auth: passthrough` are refused on a peer. Client keys are
   sent only to peers, never to other providers.
 - **The key must be valid on both routers.** Keys decide which models a client may use, not how
-  they are served. The peer checks the forwarded key against its own `api_keys`; its 401/404 is
-  a failure like any other, and the next target is tried. Peers are expected to share client keys;
+  they are served. The peer checks the forwarded key against its own `api_keys`; its 401, 403 or
+  404 is a failure for that request, and the next target is tried. Because those answers are about
+  the client, not the peer, they don't put the peer on cooldown for other clients (429, 5xx and
+  network errors do). Peers are expected to share client keys;
   `validate` can't check that.
 - **One hop, local targets only.** Requests to a peer carry `X-Router-Hop: 1`. A router receiving
   that header (any non-empty value) uses only its local targets, skipping `peer` and `external`

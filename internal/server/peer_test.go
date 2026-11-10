@@ -306,3 +306,44 @@ func TestPeerCAFile(t *testing.T) {
 		t.Error("health without ca_file should fail")
 	}
 }
+
+// A peer's 401/403/404 is about this client (its key or grant on the peer):
+// fail over, but don't put the peer on cooldown for everyone else. A 503 is
+// about the peer and does.
+func TestPeerClientRefusalSkipsCooldown(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		cooldown bool
+	}{{401, false}, {403, false}, {404, false}, {503, true}} {
+		peer := newAnthUpstream(t, "peer", nil)
+		peer.fail.Store(int32(tc.status))
+		local := newAnthUpstream(t, "local", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ok":true}`)
+		})
+		h := peerHandler(t,
+			[]config.Provider{
+				{Name: "router-b", BaseURL: peer.srv.URL + "/v1", Peer: true},
+				{Name: "cpu", BaseURL: local.srv.URL + "/v1"},
+			},
+			[]config.Model{{Name: "m", Targets: []config.Target{
+				{Provider: "router-b", Priority: 1},
+				{Provider: "cpu", Priority: 2},
+			}}},
+		)
+		// Distinct conversations, so sticky routing doesn't pin the second one.
+		for i, msg := range []string{"one", "two"} {
+			body := `{"model":"m","messages":[{"role":"user","content":"` + msg + `"}]}`
+			if w := peerPost(h, "/v1/chat/completions", body); w.Code != 200 {
+				t.Fatalf("%d, request %d: status %d", tc.status, i, w.Code)
+			}
+		}
+		want := 2 // tried first both times
+		if tc.cooldown {
+			want = 1 // second request goes to cpu first
+		}
+		if peer.n() != want {
+			t.Errorf("peer status %d: peer hit %d times, want %d", tc.status, peer.n(), want)
+		}
+	}
+}
