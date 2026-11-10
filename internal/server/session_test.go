@@ -54,7 +54,7 @@ func TestSendSessionHeader(t *testing.T) {
 	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)), Options{})
 	send := func(p *config.Provider, in *http.Request) {
 		t.Helper()
-		resp, err := s.send(context.Background(), in, &router.Target{Provider: p}, config.EndpointChat, []byte(`{}`), "derived")
+		resp, err := s.send(context.Background(), s.cur.Load(), in, &router.Target{Provider: p}, config.EndpointChat, []byte(`{}`), "derived")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -2,10 +2,12 @@
 package config
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"maps"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"slices"
@@ -253,6 +255,47 @@ type Provider struct {
 	// AllowPaths limits /provider/<name>/<path> to these paths: exact, or a
 	// prefix ending in "*" (e.g. "/v1/*"). Empty allows every path.
 	AllowPaths []string `mapstructure:"allow_paths"`
+	// External marks a provider outside this deployment (paid or remote APIs).
+	// Unmarked providers are local. A request that already made a hop between
+	// routers is never sent to an external provider.
+	External bool `mapstructure:"external"`
+	// Peer marks another simple-router. The client's own credentials are
+	// forwarded (api_key/auth_header/auth_scheme are refused), requests carry
+	// the X-Router-Hop header, and the peer is probed at <origin>/healthz.
+	Peer bool `mapstructure:"peer"`
+	// CAFile is a PEM bundle trusted (and nothing else) for this provider's
+	// TLS, for requests and health probes: pins a private or self-signed
+	// certificate.
+	CAFile string `mapstructure:"ca_file"`
+}
+
+// Local reports whether the provider may serve a request that already made a
+// hop between routers: neither a peer nor external.
+func (p *Provider) Local() bool { return !p.Peer && !p.External }
+
+// LoadCAPool reads a PEM bundle into a certificate pool; it must hold at
+// least one certificate.
+func LoadCAPool(file string) (*x509.CertPool, error) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(b) {
+		return nil, fmt.Errorf("%s: no PEM certificates found", file)
+	}
+	return pool, nil
+}
+
+// HealthURL is where a provider is probed: <origin>/healthz for a peer, else
+// the health endpoint.
+func (p Provider) HealthURL() string {
+	if p.Peer {
+		if u, err := url.Parse(p.BaseURL); err == nil {
+			return u.Scheme + "://" + u.Host + "/healthz"
+		}
+	}
+	return p.URL(EndpointHealth)
 }
 
 // Provider auth modes.
@@ -423,7 +466,7 @@ func (c *Config) ApplyDefaults() {
 		if p.Auth == "" {
 			p.Auth = AuthManaged
 		}
-		if p.Auth == AuthPassthrough {
+		if p.Auth == AuthPassthrough || p.Peer {
 			// The client's own credentials go through: nothing to default (and
 			// Validate refuses api_key/auth_header/auth_scheme here).
 			if p.HealthMethod == "" {
@@ -536,6 +579,21 @@ func (c *Config) Validate() error {
 			}
 		default:
 			add("provider %q: unknown auth %q (managed|passthrough)", p.Name, p.Auth)
+		}
+		if p.Peer {
+			switch {
+			case p.APIKey != "" || p.AuthHeader != "" || p.AuthScheme != "":
+				add("provider %q: api_key, auth_header and auth_scheme don't apply to a peer (the client's credentials are forwarded)", p.Name)
+			case p.External:
+				add("provider %q: a peer can't also be external", p.Name)
+			case p.Auth == AuthPassthrough:
+				add("provider %q: a peer can't use auth: passthrough", p.Name)
+			}
+		}
+		if p.CAFile != "" {
+			if _, err := LoadCAPool(p.CAFile); err != nil {
+				add("provider %q: ca_file: %s", p.Name, err)
+			}
 		}
 		for _, a := range p.AllowPaths {
 			if !strings.HasPrefix(a, "/") || strings.Contains(strings.TrimSuffix(a, "*"), "*") {

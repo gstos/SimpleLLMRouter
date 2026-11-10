@@ -66,6 +66,7 @@ providers:
   - name: openrouter
     base_url: https://openrouter.ai/api/v1
     api_key: enc:v1:REPLACE_ME
+    external: true           # outside this deployment: skipped for requests forwarded by a peer
     headers:
       X-Title: simple-router
   - name: azure
@@ -96,6 +97,10 @@ providers:
     base_url: https://opencode.ai/zen/go/v1    # client's own key; the router checks nothing
     auth: passthrough                          # (trusted networks / server.allow_cidrs)
     session_header: X-Opencode-Session
+  - name: router-b           # another simple-router: client credentials are forwarded
+    base_url: https://router-b.lan:8443/v1     # (no api_key); one hop, local targets only; probed
+    peer: true                                 # at https://router-b.lan:8443/healthz
+    # ca_file: /etc/sr/router-b.pem            # trust only this PEM (pin a self-signed certificate)
   - name: llama-swap         # managed (default): /provider/llama-swap/<path> needs a router key
     base_url: http://127.0.0.1:8080            # whose `providers` grant it; no stored key here
     allow_paths: ["/v1/*", "/upstream/*", "/running"]   # keep /unload, /logs and the UI out
@@ -134,6 +139,7 @@ models:
   - name: local/llama
     targets:
       - { provider: local-vllm, model: meta-llama/Llama-3.1-8B-Instruct }
+      - { provider: router-b, priority: 2 }   # peer: model defaults to this model's name
 
 api_keys:
   - name: admin

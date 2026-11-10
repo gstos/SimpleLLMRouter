@@ -111,6 +111,9 @@ providers:                         # OpenAI-compatible upstreams
     # session_header: X-Opencode-Session            # send a per-conversation id (see below)
     # auth: managed                # or passthrough: client credentials forwarded (see "Direct provider access")
     # allow_paths: ["/v1/*"]       # limit /provider/openai/... to these paths
+    # external: true               # outside this deployment (paid/remote API): never used for a forwarded request
+    # peer: true                   # another simple-router (see "Peer routers"); no api_key, client credentials forwarded
+    # ca_file: /etc/sr/ca.pem      # PEM bundle trusted (only it) for this provider's HTTPS: requests and probes
 
 models:
   - name: openai/gpt-4o            # the id clients send
@@ -180,7 +183,7 @@ All commands take `-c/--config` and the master key options (see [Master key](#ma
 |---|---|
 | `serve [--watch=false] [--master-key-stdin] [--allow-remote-key-admin] [--lego PATH]` | Run the router. `--lego` (env `SIMPLE_ROUTER_LEGO`) picks the lego binary for TLS mode `acme`. |
 | `init [--listen ADDR] [--no-tls]` | First use: creates the master key file (0600), a starter config with `master_key_check` and HTTPS with a self-signed certificate (`--no-tls`: plain HTTP), and an `admin` client key (printed once). Never overwrites. |
-| `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S] [--session-header H] [--auth managed\|passthrough]` | Encrypts the provider key with the master key and adds the provider. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
+| `provider add <name> --base-url URL [--api-key K \| --no-auth] [--auth-header H] [--auth-scheme S] [--session-header H] [--auth managed\|passthrough] [--external] [--peer] [--ca-file PEM]` | Encrypts the provider key with the master key and adds the provider. `--peer` takes no key and refuses `--api-key`, `--auth-*`, `--external` and `--auth passthrough`. Without `--api-key`, the key is read from piped stdin or a hidden prompt. |
 | `provider list` / `provider remove <name>` | Remove is refused while a model still targets the provider. |
 | `key add <name> [--models a,b*] [--admin] [--providers p,q*]` | Generates a client key, stores only its hash, prints the key once. Default access: all models, no `/provider/` access. |
 | `key list` / `key remove <name>` | Names and access only; keys can't be recovered. |
@@ -226,7 +229,9 @@ or `X-Api-Key`. Errors use OpenRouter's shape: `{"error": {"code": 404, "message
 | any | `/provider/<name>/<path>` | forwarded unchanged to one provider, with a router key (`auth: managed`) or the client's own credentials (`auth: passthrough`); see [Direct provider access](#direct-provider-access) |
 
 A model a key can't use gets the same 404 as an unknown model, so keys can't discover which models
-exist. Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`.
+exist. Responses carry `X-Router-Provider` and `X-Router-Upstream-Model`; when the target is a
+[peer router](#peer-routers), the peer's own values come as `X-Router-Peer-Provider` and
+`X-Router-Peer-Model`. A request carrying `X-Router-Hop` is served by local targets only.
 
 ### Anthropic Messages API
 
@@ -363,6 +368,62 @@ relay through it to them (with their own provider key). Restrict who can connect
 [`server.allow_cidrs`](#client-allowlist), keep it on a trusted network, or put it behind a proxy
 that restricts access.
 
+## Peer routers
+
+Two or more routers can share model names and client keys while running on different machines and
+backends (say one with a GPU and one CPU-only), so a model can fall back between them in any order.
+Mark the other router as a `peer`; it is an ordinary target, so priorities, round robin, failover,
+cooldown and sticky routing work as usual and the order is set per model.
+
+```yaml
+providers:
+  - name: gpu-local
+    base_url: http://127.0.0.1:8080/v1
+  - name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key: enc:v1:...
+    external: true
+  - name: router-b
+    base_url: https://router-b.lan:8443/v1
+    peer: true
+    ca_file: /etc/sr/router-b.pem      # pin a self-signed peer certificate
+
+models:
+  - name: qwen3-coder
+    targets:
+      - {provider: gpu-local,  model: qwen3-coder,      priority: 1}  # local GPU
+      - {provider: openrouter, model: qwen/qwen3-coder, priority: 2}  # external
+      - {provider: router-b,                            priority: 3}  # peer; model defaults to the model's name
+```
+
+- **Client credentials are forwarded.** To a peer the router sends the client's own `Authorization`
+  and/or `X-Api-Key` exactly as received (plus `X-Session-Id` if sent, so conversations stay sticky
+  inside the peer, and the provider's `headers`), instead of a stored key. `api_key`, `auth_header`,
+  `auth_scheme`, `external: true` and `auth: passthrough` are refused on a peer. Client keys are
+  sent only to peers, never to other providers.
+- **The key must be valid on both routers.** Keys decide which models a client may use, not how
+  they are served. The peer checks the forwarded key against its own `api_keys`; its 401, 403 or
+  404 is a failure for that request, and the next target is tried. Because those answers are about
+  the client, not the peer, they don't put the peer on cooldown for other clients (429, 5xx and
+  network errors do). Peers are expected to share client keys;
+  `validate` can't check that.
+- **One hop, local targets only.** Requests to a peer carry `X-Router-Hop: 1`. A router receiving
+  that header (any non-empty value) uses only its local targets, skipping `peer` and `external`
+  providers, and answers 503 (in its usual error shape, Anthropic's on `/v1/messages`) when none
+  can serve the model, so the sender moves on. This rules out loops (A to B to A), duplicate calls
+  to external providers, and a peer spending its credits on another router's requests. Spoofing the
+  header only narrows the sender's own routing; authentication and model access are unchanged.
+- **Health.** A peer is probed at `GET <scheme://host[:port] of base_url>/healthz` with no
+  credentials; it is healthy only on 200 with body `ok`. `sealed` counts as down.
+- **TLS.** `ca_file` (any provider, not only peers) is a PEM bundle: only its certificates are
+  trusted for that provider's requests and health probes. It must exist and hold a certificate
+  when the config loads (validation names the provider). Use it to pin a private or self-signed
+  certificate, or for a local HTTPS server.
+- **Direct access** (`/provider/<name>/`) to a peer is unchanged: it uses `base_url` and the
+  provider's own settings, and sends no client credentials.
+- **Trust.** A peer is as trusted as the router itself: it sees client keys and prompts. Use HTTPS
+  (pinned with `ca_file` when self-signed) or loopback.
+
 ## Client allowlist
 
 `server.allow_cidrs` limits which client addresses may use the router at all. It covers every
@@ -420,8 +481,12 @@ server:
    hash of the messages through the first user message (for completions, of the prompt's start;
    for System One, of the whole `state`). Follow-ups stay on the
    same provider, even after a failover, while separate conversations still spread across providers.
-4. Providers that fail the background health check (`GET <base_url>/models`, or `base_urls.health` and `paths.health` if set), and targets on
+4. Providers that fail the background health check (`GET <base_url>/models`, or `base_urls.health` and `paths.health` if set; a peer is probed at `GET <origin>/healthz`), and targets on
    cooldown, go to the back of the list. They are still tried as a last resort.
+
+A provider is **local** unless marked `external: true` (a paid or remote API) or `peer: true`
+(another router). Priorities decide the order per model, whatever the kind: for example local GPU
+(1), external (2), peer (3).
 
 Upstream redirects are never followed, so provider credentials can't be forwarded to another host:
 a redirect counts as a failure (and fails over). Set `base_url` to the provider's final URL. The
