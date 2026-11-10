@@ -62,6 +62,7 @@ server:
 providers:
   - name: openai
     base_url: https://api.openai.com/v1
+    external: true
     api_key: enc:v1:REPLACE_ME
   - name: openrouter
     base_url: https://openrouter.ai/api/v1
@@ -71,11 +72,13 @@ providers:
       X-Title: simple-router
   - name: azure
     base_url: https://my-resource.openai.azure.com/openai/v1
+    external: true
     api_key: enc:v1:REPLACE_ME
     auth_header: api-key
     auth_scheme: none       # send the raw key, no "Bearer "
   - name: cohere
     base_url: https://api.cohere.com/v2
+    external: true
     api_key: enc:v1:REPLACE_ME
     paths:
       rerank: /rerank
@@ -84,11 +87,13 @@ providers:
     base_url: http://localhost:8000/v1
   - name: anthropic          # Anthropic Messages API (models of type: messages)
     base_url: https://api.anthropic.com/v1
+    external: true
     api_key: enc:v1:REPLACE_ME
     auth_header: x-api-key
     auth_scheme: none
   - name: opencode-go        # OpenCode Go subscription
     base_url: https://opencode.ai/zen/go/v1
+    external: true
     api_key: enc:v1:REPLACE_ME
     session_header: X-Opencode-Session   # required: a per-conversation id is sent in it
     base_urls:                           # same host, other prefix: System One (jev-*) models
@@ -96,6 +101,7 @@ providers:
   - name: opencode-go-pass   # /provider/opencode-go-pass/<path>, forwarded unchanged with the
     base_url: https://opencode.ai/zen/go/v1    # client's own key; the router checks nothing
     auth: passthrough                          # (trusted networks / server.allow_cidrs)
+    external: true
     session_header: X-Opencode-Session
   - name: router-b           # another simple-router: client credentials are forwarded
     base_url: https://router-b.lan:8443/v1     # (no api_key); one hop, local targets only; probed
@@ -152,4 +158,4 @@ api_keys:
     models: ["openai/text-embedding-*", "cohere/*"]   # glob patterns
   - name: private-notes
     hash: sha256:REPLACE_WITH_64_HEX_CHARS_FROM_simple-router_apikey_000000000000000
-    disable_external: true         # never sent to external providers (peers serve it locally)
+    disable_external: true   # never sent to external providers (peers serve it locally)
